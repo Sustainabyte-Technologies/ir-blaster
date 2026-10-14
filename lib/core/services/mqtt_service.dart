@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:ir_blaster_ac/core/config/app_config.dart';
@@ -14,6 +13,7 @@ import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 class SirisDeviceState {
   final String deviceId;
   final String imei;
+  final String wifiMac;
   final String ac; // "ON" or "OFF"
   final int setTemp;
   final int currentTemp;
@@ -29,24 +29,31 @@ class SirisDeviceState {
   final String primarySsid;
   final String secondarySsid;
   final bool automate; // Smart Automation state
- 
+
   // Schedule slots
   final String schOn1;
   final String schOff1;
+  final String schDays1;
   final String schOn2;
   final String schOff2;
+  final String schDays2;
   final String schOn3;
   final String schOff3;
+  final String schDays3;
   final String schOn4;
   final String schOff4;
+  final String schDays4;
   final String schOn5;
   final String schOff5;
+  final String schDays5;
   final String lunchOn;
   final String lunchOff;
- 
+  final String lunchDays;
+
   SirisDeviceState({
     required this.deviceId,
     required this.imei,
+    this.wifiMac = '',
     required this.ac,
     required this.setTemp,
     required this.currentTemp,
@@ -61,16 +68,22 @@ class SirisDeviceState {
     required this.time,
     required this.schOn1,
     required this.schOff1,
+    this.schDays1 = 'ALL',
     required this.schOn2,
     required this.schOff2,
+    this.schDays2 = 'ALL',
     required this.schOn3,
     required this.schOff3,
+    this.schDays3 = 'ALL',
     required this.schOn4,
     required this.schOff4,
+    this.schDays4 = 'ALL',
     required this.schOn5,
     required this.schOff5,
+    this.schDays5 = 'ALL',
     required this.lunchOn,
     required this.lunchOff,
+    this.lunchDays = 'ALL',
     this.primarySsid = '',
     this.secondarySsid = '',
     this.automate = false,
@@ -79,6 +92,7 @@ class SirisDeviceState {
   SirisDeviceState copyWith({
     String? deviceId,
     String? imei,
+    String? wifiMac,
     String? ac,
     int? setTemp,
     int? currentTemp,
@@ -95,21 +109,28 @@ class SirisDeviceState {
     String? secondarySsid,
     String? schOn1,
     String? schOff1,
+    String? schDays1,
     String? schOn2,
     String? schOff2,
+    String? schDays2,
     String? schOn3,
     String? schOff3,
+    String? schDays3,
     String? schOn4,
     String? schOff4,
+    String? schDays4,
     String? schOn5,
     String? schOff5,
+    String? schDays5,
     String? lunchOn,
     String? lunchOff,
+    String? lunchDays,
     bool? automate,
   }) {
     return SirisDeviceState(
       deviceId: deviceId ?? this.deviceId,
       imei: imei ?? this.imei,
+      wifiMac: wifiMac ?? this.wifiMac,
       ac: ac ?? this.ac,
       setTemp: setTemp ?? this.setTemp,
       currentTemp: currentTemp ?? this.currentTemp,
@@ -126,16 +147,22 @@ class SirisDeviceState {
       secondarySsid: secondarySsid ?? this.secondarySsid,
       schOn1: schOn1 ?? this.schOn1,
       schOff1: schOff1 ?? this.schOff1,
+      schDays1: schDays1 ?? this.schDays1,
       schOn2: schOn2 ?? this.schOn2,
       schOff2: schOff2 ?? this.schOff2,
+      schDays2: schDays2 ?? this.schDays2,
       schOn3: schOn3 ?? this.schOn3,
       schOff3: schOff3 ?? this.schOff3,
+      schDays3: schDays3 ?? this.schDays3,
       schOn4: schOn4 ?? this.schOn4,
       schOff4: schOff4 ?? this.schOff4,
+      schDays4: schDays4 ?? this.schDays4,
       schOn5: schOn5 ?? this.schOn5,
       schOff5: schOff5 ?? this.schOff5,
+      schDays5: schDays5 ?? this.schDays5,
       lunchOn: lunchOn ?? this.lunchOn,
       lunchOff: lunchOff ?? this.lunchOff,
+      lunchDays: lunchDays ?? this.lunchDays,
       automate: automate ?? this.automate,
     );
   }
@@ -146,12 +173,14 @@ class SirisDeviceState {
       status.toUpperCase() == 'OFF';
   bool get isPowerOn => ac.toUpperCase() == 'ON';
 
-  factory SirisDeviceState.fromJson(Map<String, dynamic> json) {
+  factory SirisDeviceState.fromJson(Map<String, dynamic> json,
+      [SirisDeviceState? previousState]) {
     // Resolve the root object containing the device metadata.
     Map<String, dynamic> root = json;
     if (json['data'] is Map<String, dynamic>) {
       final innerData = json['data'] as Map<String, dynamic>;
-      if (innerData.containsKey('device_id') || innerData.containsKey('deviceId')) {
+      if (innerData.containsKey('device_id') ||
+          innerData.containsKey('deviceId')) {
         root = innerData;
       }
     }
@@ -162,36 +191,186 @@ class SirisDeviceState {
       payload = root['data'] as Map<String, dynamic>;
     }
 
+    // Extract fields from raw_payload if present (e.g. from backend SSE wrapping)
+    Map<String, dynamic> rawObj = {};
+    final dynamic rawPayloadField =
+        root['raw_payload'] ?? json['raw_payload'] ?? payload['raw_payload'];
+    if (rawPayloadField is String && rawPayloadField.isNotEmpty) {
+      try {
+        final parsed = jsonDecode(rawPayloadField);
+        if (parsed is Map<String, dynamic>) {
+          rawObj = parsed;
+          if (rawObj['data'] is Map<String, dynamic>) {
+            rawObj.addAll(rawObj['data'] as Map<String, dynamic>);
+          }
+        }
+      } catch (_) {}
+    }
+
+    String getSch(String key,
+        [String? previousVal, String fallback = 'DISABLED', String? altKey]) {
+      final v = root[key] ??
+          payload[key] ??
+          rawObj[key] ??
+          (altKey != null
+              ? (root[altKey] ?? payload[altKey] ?? rawObj[altKey])
+              : null);
+      if (v == null) return previousVal ?? fallback;
+      final str = v.toString().trim();
+      return str.isEmpty ? (previousVal ?? fallback) : str;
+    }
+
     return SirisDeviceState(
-      deviceId: (root['device_id'] ?? root['deviceId'] ?? '').toString(),
-      imei: (root['imei'] ?? '').toString(),
-      ac: (payload['ac'] ?? root['ac'] ?? 'OFF').toString().toUpperCase(),
-      setTemp: _toInt(root['set_temp'] ?? payload['set_temp'] ?? root['setTemp'] ?? payload['setTemp'], 24),
-      currentTemp: _toInt(root['current_temp'] ?? payload['temp'] ?? payload['current_temp'] ?? root['currentTemp'] ?? payload['currentTemp'], 0),
-      humidity: _toInt(root['hum'] ?? payload['hum'] ?? root['humidity'] ?? payload['humidity'], 0),
-      irOnLearned: (root['ir_on_learned'] ?? payload['ir_on_learned'] ?? root['irOnLearned'] ?? payload['irOnLearned']) == true,
-      irOffLearned: (root['ir_off_learned'] ?? payload['ir_off_learned'] ?? root['irOffLearned'] ?? payload['irOffLearned']) == true,
-      status: (root['status'] ?? payload['status'] ?? 'ACTIVE').toString().toUpperCase(),
-      wifiSsid: (root['wifi_ssid'] ?? payload['wifi_ssid'] ?? root['wifiSsid'] ?? payload['wifiSsid'] ?? '').toString(),
-      wifiIp: (root['wifi_ip'] ?? payload['wifi_ip'] ?? root['wifiIp'] ?? payload['wifiIp'] ?? '').toString(),
-      wifiNetwork: (root['wifi_network'] ?? payload['wifi_network'] ?? root['wifiNetwork'] ?? payload['wifiNetwork'] ?? '').toString(),
-      wifiRssi: _toInt(root['wifi_rssi'] ?? payload['wifi_rssi'] ?? root['wifiRssi'] ?? payload['wifiRssi'], 0),
-      time: (payload['time'] ?? root['time'] ?? '').toString(),
-      schOn1: (root['sch_on1'] ?? payload['sch_on1'] ?? 'DISABLED').toString(),
-      schOff1: (root['sch_off1'] ?? payload['sch_off1'] ?? 'DISABLED').toString(),
-      schOn2: (root['sch_on2'] ?? payload['sch_on2'] ?? 'DISABLED').toString(),
-      schOff2: (root['sch_off2'] ?? payload['sch_off2'] ?? 'DISABLED').toString(),
-      schOn3: (root['sch_on3'] ?? payload['sch_on3'] ?? 'DISABLED').toString(),
-      schOff3: (root['sch_off3'] ?? payload['sch_off3'] ?? 'DISABLED').toString(),
-      schOn4: (root['sch_on4'] ?? payload['sch_on4'] ?? 'DISABLED').toString(),
-      schOff4: (root['sch_off4'] ?? payload['sch_off4'] ?? 'DISABLED').toString(),
-      schOn5: (root['sch_on5'] ?? payload['sch_on5'] ?? 'DISABLED').toString(),
-      schOff5: (root['sch_off5'] ?? payload['sch_off5'] ?? 'DISABLED').toString(),
-      lunchOn: (root['lunch_on'] ?? payload['lunch_on'] ?? 'DISABLED').toString(),
-      lunchOff: (root['lunch_off'] ?? payload['lunch_off'] ?? 'DISABLED').toString(),
-      primarySsid: (root['wifi_primary_ssid'] ?? root['primary_ssid'] ?? payload['wifi_primary_ssid'] ?? payload['primary_ssid'] ?? '').toString(),
-      secondarySsid: (root['wifi_secondary_ssid'] ?? root['secondary_ssid'] ?? payload['wifi_secondary_ssid'] ?? payload['secondary_ssid'] ?? '').toString(),
-      automate: (root['automate'] ?? payload['automate']) == true,
+      deviceId:
+          (root['device_id'] ?? root['deviceId'] ?? rawObj['device_id'] ?? '')
+              .toString(),
+      imei: (root['imei'] ?? rawObj['imei'] ?? '').toString(),
+      wifiMac: (root['mac'] ??
+              root['wifi_mac'] ??
+              root['mac_id'] ??
+              root['mac_address'] ??
+              root['macAddress'] ??
+              root['bssid'] ??
+              payload['mac'] ??
+              payload['wifi_mac'] ??
+              payload['mac_id'] ??
+              payload['mac_address'] ??
+              payload['macAddress'] ??
+              payload['bssid'] ??
+              rawObj['mac'] ??
+              rawObj['wifi_mac'] ??
+              rawObj['mac_id'] ??
+              '')
+          .toString(),
+      ac: (payload['ac'] ?? root['ac'] ?? rawObj['ac'] ?? 'OFF')
+          .toString()
+          .toUpperCase(),
+      setTemp: _toInt(
+          root['set_temp'] ??
+              payload['set_temp'] ??
+              rawObj['set_temp'] ??
+              root['setTemp'] ??
+              payload['setTemp'],
+          24),
+      currentTemp: () {
+        int parsedCurrentTemp = _toInt(
+            root['current_temp'] ??
+                payload['temp'] ??
+                payload['current_temp'] ??
+                rawObj['current_temp'] ??
+                rawObj['temp'] ??
+                root['currentTemp'] ??
+                payload['currentTemp'],
+            0);
+
+        final bool isOffsetApplied = root['temp_offset_applied'] == true ||
+            payload['temp_offset_applied'] == true ||
+            rawObj['temp_offset_applied'] == true;
+
+        final String rawDevId = (root['device_id'] ??
+                root['deviceId'] ??
+                payload['device_id'] ??
+                payload['deviceId'] ??
+                rawObj['device_id'] ??
+                '')
+            .toString();
+
+        final String rawImei = (root['imei'] ?? payload['imei'] ?? rawObj['imei'] ?? '').toString();
+
+        if (!isOffsetApplied &&
+            parsedCurrentTemp > 0 &&
+            (rawDevId.toLowerCase().contains('bluestar') || rawImei.toLowerCase().contains('bluestar'))) {
+          parsedCurrentTemp = (parsedCurrentTemp - 6).clamp(0, 50);
+        }
+
+        return parsedCurrentTemp;
+      }(),
+      humidity: _toInt(
+          root['hum'] ??
+              payload['hum'] ??
+              rawObj['hum'] ??
+              root['humidity'] ??
+              payload['humidity'],
+          0),
+      irOnLearned: (root['ir_on_learned'] ??
+              payload['ir_on_learned'] ??
+              rawObj['ir_on_learned'] ??
+              root['irOnLearned'] ??
+              payload['irOnLearned']) ==
+          true,
+      irOffLearned: (root['ir_off_learned'] ??
+              payload['ir_off_learned'] ??
+              rawObj['ir_off_learned'] ??
+              root['irOffLearned'] ??
+              payload['irOffLearned']) ==
+          true,
+      status:
+          (root['status'] ?? payload['status'] ?? rawObj['status'] ?? 'ACTIVE')
+              .toString()
+              .toUpperCase(),
+      wifiSsid: (root['wifi_ssid'] ??
+              payload['wifi_ssid'] ??
+              rawObj['wifi_ssid'] ??
+              root['wifiSsid'] ??
+              payload['wifiSsid'] ??
+              '')
+          .toString(),
+      wifiIp: (root['wifi_ip'] ??
+              payload['wifi_ip'] ??
+              rawObj['wifi_ip'] ??
+              root['wifiIp'] ??
+              payload['wifiIp'] ??
+              '')
+          .toString(),
+      wifiNetwork: (root['wifi_network'] ??
+              payload['wifi_network'] ??
+              rawObj['wifi_network'] ??
+              root['wifiNetwork'] ??
+              payload['wifiNetwork'] ??
+              '')
+          .toString(),
+      wifiRssi: _toInt(
+          root['wifi_rssi'] ??
+              payload['wifi_rssi'] ??
+              rawObj['wifi_rssi'] ??
+              root['wifiRssi'] ??
+              payload['wifiRssi'],
+          0),
+      time:
+          (payload['time'] ?? root['time'] ?? rawObj['time'] ?? '').toString(),
+      schOn1: getSch('sch_on1', previousState?.schOn1, 'DISABLED', 'on1'),
+      schOff1: getSch('sch_off1', previousState?.schOff1, 'DISABLED', 'off1'),
+      schDays1: getSch('sch_days1', previousState?.schDays1, 'ALL', 'days1'),
+      schOn2: getSch('sch_on2', previousState?.schOn2, 'DISABLED', 'on2'),
+      schOff2: getSch('sch_off2', previousState?.schOff2, 'DISABLED', 'off2'),
+      schDays2: getSch('sch_days2', previousState?.schDays2, 'ALL', 'days2'),
+      schOn3: getSch('sch_on3', previousState?.schOn3, 'DISABLED', 'on3'),
+      schOff3: getSch('sch_off3', previousState?.schOff3, 'DISABLED', 'off3'),
+      schDays3: getSch('sch_days3', previousState?.schDays3, 'ALL', 'days3'),
+      schOn4: getSch('sch_on4', previousState?.schOn4, 'DISABLED', 'on4'),
+      schOff4: getSch('sch_off4', previousState?.schOff4, 'DISABLED', 'off4'),
+      schDays4: getSch('sch_days4', previousState?.schDays4, 'ALL', 'days4'),
+      schOn5: getSch('sch_on5', previousState?.schOn5, 'DISABLED', 'on5'),
+      schOff5: getSch('sch_off5', previousState?.schOff5, 'DISABLED', 'off5'),
+      schDays5: getSch('sch_days5', previousState?.schDays5, 'ALL', 'days5'),
+      lunchOn: getSch('lunch_on', previousState?.lunchOn, 'DISABLED', 'lunchOn'),
+      lunchOff: getSch('lunch_off', previousState?.lunchOff, 'DISABLED', 'lunchOff'),
+      lunchDays: getSch('lunch_days', previousState?.lunchDays, 'ALL', 'lunchDays'),
+      primarySsid: (root['wifi_primary_ssid'] ??
+              root['primary_ssid'] ??
+              payload['wifi_primary_ssid'] ??
+              payload['primary_ssid'] ??
+              '')
+          .toString(),
+      secondarySsid: (root['wifi_secondary_ssid'] ??
+              root['secondary_ssid'] ??
+              payload['wifi_secondary_ssid'] ??
+              payload['secondary_ssid'] ??
+              '')
+          .toString(),
+      automate:
+          (root['automate'] ?? payload['automate'] ?? rawObj['automate']) ==
+              true,
     );
   }
 
@@ -212,6 +391,8 @@ enum SirisResponseType {
   scheduleSet,
   scheduleCleared,
   scheduleError,
+  scheduleUpdated,
+  scheduleUpdatedWithErrors,
   cmdRejected,
   cmdError,
   unknown,
@@ -237,11 +418,13 @@ class SirisResponse {
   final SirisResponseType type;
   final String rawPayload;
   final String? detail;
+  final String? deviceId;
 
   SirisResponse({
     required this.type,
     required this.rawPayload,
     this.detail,
+    this.deviceId,
   });
 }
 
@@ -253,7 +436,8 @@ class SirisResponse {
 /// 2. Plain text only to command topics — never JSON
 /// 3. Never send DISABLED — use SCH_CLEARx commands
 /// 4. Never echo back values from JSON
-/// 5. Subscribe to testir/data before sending any command
+/// 5. Subscribe to
+/// /data before sending any command
 /// 6. Send STATUS on startup
 /// 7. Only publish on explicit user action
 /// 8. Wait for ack before confirming UI update
@@ -271,6 +455,22 @@ class MqttService extends ChangeNotifier {
   int _connectionAttempt = 0;
   bool _isConnected = false;
   String _deviceId = '';
+  String get deviceId => _deviceId;
+
+  void setDeviceId(String id) {
+    if (id.isNotEmpty && id != _deviceId) {
+      _deviceId = id;
+      AppConfig.mqttDeviceId = id;
+      _subscribeToDataTopic();
+      _startSseStream(_companyId, _deviceId, _imei);
+    }
+  }
+
+  /// Public accessor to publish raw message to any topic.
+  Future<bool> publishToTopic(String topic, String message) async {
+    return await _publish(topic, message);
+  }
+
   String _companyId = '';
   Timer? _sseWatchdogTimer;
   BluetoothConnection? _bluetoothConnection;
@@ -315,7 +515,7 @@ class MqttService extends ChangeNotifier {
     conn.input?.listen((Uint8List data) {
       final chunk = String.fromCharCodes(data);
       _incomingBtBuffer += chunk;
-      
+
       String line;
       while ((line = _extractBtLine()) != "") {
         _handleBtLine(line.trim());
@@ -359,7 +559,7 @@ class MqttService extends ChangeNotifier {
   void _handleBtLine(String line) {
     if (line.isEmpty) return;
     debugPrint('📡 [Bluetooth] RX: $line');
-    
+
     if (line.startsWith("TEMP:")) {
       final valStr = line.replaceFirst("TEMP:", "").trim();
       final val = int.tryParse(valStr);
@@ -382,38 +582,41 @@ class MqttService extends ChangeNotifier {
     }
   }
 
-  void _updateLocalBluetoothState({String? ac, int? setTemp, int? currentTemp, bool? automate}) {
+  void _updateLocalBluetoothState(
+      {String? ac, int? setTemp, int? currentTemp, bool? automate}) {
     if (_deviceId.isEmpty) return;
     final lowerId = _deviceId.toLowerCase();
-    final existingState = _deviceStates[lowerId] ?? lastState ?? SirisDeviceState(
-      deviceId: _deviceId,
-      imei: _imei ?? _deviceId,
-      ac: 'OFF',
-      setTemp: 24,
-      currentTemp: 24,
-      humidity: 50,
-      irOnLearned: true,
-      irOffLearned: true,
-      status: 'ACTIVE',
-      wifiSsid: '',
-      wifiIp: '',
-      wifiNetwork: 'PRIMARY',
-      wifiRssi: -50,
-      time: '12:00',
-      schOn1: 'DISABLED',
-      schOff1: 'DISABLED',
-      schOn2: 'DISABLED',
-      schOff2: 'DISABLED',
-      schOn3: 'DISABLED',
-      schOff3: 'DISABLED',
-      schOn4: 'DISABLED',
-      schOff4: 'DISABLED',
-      schOn5: 'DISABLED',
-      schOff5: 'DISABLED',
-      lunchOn: 'DISABLED',
-      lunchOff: 'DISABLED',
-      automate: false,
-    );
+    final existingState = _deviceStates[lowerId] ??
+        lastState ??
+        SirisDeviceState(
+          deviceId: _deviceId,
+          imei: _imei ?? _deviceId,
+          ac: 'OFF',
+          setTemp: 24,
+          currentTemp: 24,
+          humidity: 50,
+          irOnLearned: true,
+          irOffLearned: true,
+          status: 'ACTIVE',
+          wifiSsid: '',
+          wifiIp: '',
+          wifiNetwork: 'PRIMARY',
+          wifiRssi: -50,
+          time: '12:00',
+          schOn1: 'DISABLED',
+          schOff1: 'DISABLED',
+          schOn2: 'DISABLED',
+          schOff2: 'DISABLED',
+          schOn3: 'DISABLED',
+          schOff3: 'DISABLED',
+          schOn4: 'DISABLED',
+          schOff4: 'DISABLED',
+          schOn5: 'DISABLED',
+          schOff5: 'DISABLED',
+          lunchOn: 'DISABLED',
+          lunchOff: 'DISABLED',
+          automate: false,
+        );
     final newState = existingState.copyWith(
       ac: ac,
       setTemp: setTemp,
@@ -434,9 +637,10 @@ class MqttService extends ChangeNotifier {
     }
     try {
       debugPrint('📡 [Bluetooth] TX: $cmd');
-      _bluetoothConnection!.output.add(Uint8List.fromList(utf8.encode("$cmd\r\n")));
+      _bluetoothConnection!.output
+          .add(Uint8List.fromList(utf8.encode("$cmd\r\n")));
       await _bluetoothConnection!.output.allSent;
-      
+
       if (cmd == 'SEND:ON') {
         _updateLocalBluetoothState(ac: 'ON');
       } else if (cmd == 'SEND:OFF') {
@@ -446,6 +650,16 @@ class MqttService extends ChangeNotifier {
         final t = int.tryParse(tStr);
         if (t != null) {
           _updateLocalBluetoothState(setTemp: t);
+        }
+      } else if (cmd == 'TEMP_UP') {
+        final cur = lastState?.setTemp ?? 24;
+        if (cur < 30) {
+          _updateLocalBluetoothState(setTemp: cur + 1);
+        }
+      } else if (cmd == 'TEMP_DOWN') {
+        final cur = lastState?.setTemp ?? 24;
+        if (cur > 16) {
+          _updateLocalBluetoothState(setTemp: cur - 1);
         }
       }
 
@@ -469,24 +683,29 @@ class MqttService extends ChangeNotifier {
   SirisDeviceState? _lastState;
   SirisDeviceState? get lastState => _lastState;
   bool get isConnected => _isConnected;
-  String get deviceId => _deviceId;
 
   SirisDeviceState? getLastStateFor(String id) {
     if (id.isEmpty) return null;
     final lowerId = id.toLowerCase();
-    
+
     SirisDeviceState? state;
     if (_deviceStates.containsKey(lowerId)) {
       state = _deviceStates[lowerId];
     } else {
       for (var entry in _deviceStates.entries) {
         final st = entry.value;
-        if (st.deviceId.toLowerCase() == lowerId ||
+        final stDevLower = st.deviceId.toLowerCase();
+        final isDevMatch = stDevLower == lowerId ||
             st.imei.toLowerCase() == lowerId ||
-            st.deviceId.toLowerCase().contains(lowerId) ||
-            lowerId.contains(st.deviceId.toLowerCase()) ||
+            stDevLower.contains(lowerId) ||
+            lowerId.contains(stDevLower) ||
             st.imei.toLowerCase().contains(lowerId) ||
-            lowerId.contains(st.imei.toLowerCase())) {
+            lowerId.contains(st.imei.toLowerCase()) ||
+            (!lowerId.contains('test') &&
+                !stDevLower.contains('test') &&
+                lowerId.contains('sustainabyte') &&
+                stDevLower.contains('sustainabyte'));
+        if (isDevMatch) {
           state = st;
           break;
         }
@@ -496,7 +715,8 @@ class MqttService extends ChangeNotifier {
     if (state != null) {
       final lastTime = _deviceLastReceivedTime[state.deviceId.toLowerCase()] ??
           _deviceLastReceivedTime[state.imei.toLowerCase()];
-      if (lastTime == null || DateTime.now().difference(lastTime) > const Duration(seconds: 30)) {
+      if (lastTime == null ||
+          DateTime.now().difference(lastTime) > const Duration(seconds: 30)) {
         return state.copyWith(status: 'INACTIVE');
       }
       return state;
@@ -521,7 +741,37 @@ class MqttService extends ChangeNotifier {
   /// [deviceId] — the SIRIS device identifier.
   /// [companyId] — optional company ID to fetch MQTT credentials for.
   /// [imei] — the physical IMEI or unique identifier of the device for status matching.
-  Future<bool> connect({String? deviceId, String? companyId, String? imei}) async {
+  Future<bool> connect(
+      {String? deviceId, String? companyId, String? imei}) async {
+    if (_client != null &&
+        _client!.connectionStatus?.state == MqttConnectionState.connected) {
+      debugPrint('🟢 [MQTT] Already connected. Reusing active connection.');
+      if (deviceId != null && deviceId.isNotEmpty && deviceId != _deviceId) {
+        final oldDeviceId = _deviceId;
+        _deviceId = deviceId;
+        _imei = imei;
+        AppConfig.mqttDeviceId = deviceId;
+        _subscribeToDataTopic();
+
+        // Restart SSE stream for the new device so telemetry targets the switched device
+        final cId = (companyId != null && companyId.isNotEmpty)
+            ? companyId
+            : _companyId;
+        if (cId.isNotEmpty) {
+          _companyId = cId;
+          debugPrint(
+              '🔄 [MQTT] Device switched from $oldDeviceId to $deviceId — restarting SSE stream');
+          _startSseStream(_companyId, _deviceId, _imei);
+        }
+      }
+      return true;
+    }
+    if (_isConnecting) {
+      debugPrint(
+          '⏳ [MQTT] Connection attempt already in progress. Skipping new connect call.');
+      return false;
+    }
+
     final currentAttempt = ++_connectionAttempt;
     _isConnecting = true;
     _isConnected = false;
@@ -553,8 +803,12 @@ class MqttService extends ChangeNotifier {
       type: 'AC',
     );
 
-    final broker = AppConfig.mqttBroker;
-    final port = AppConfig.mqttPort;
+    final broker = (mqttCreds?.host != null && mqttCreds!.host!.isNotEmpty)
+        ? mqttCreds.host!
+        : AppConfig.mqttBroker;
+    final port = (mqttCreds?.port != null && mqttCreds!.port! > 0)
+        ? mqttCreds.port!
+        : AppConfig.mqttPort;
     final username = mqttCreds?.username.isNotEmpty == true
         ? mqttCreds!.username
         : AppConfig.mqttUsername;
@@ -616,6 +870,18 @@ class MqttService extends ChangeNotifier {
         _isConnected = true;
         _isConnecting = false;
 
+        // Attach listener for incoming MQTT messages on socket
+        try {
+          _client!.updates!.listen(_onMessage);
+          debugPrint(
+              '🎧 [MQTT] Attached incoming message listener (_onMessage)');
+        } catch (e) {
+          debugPrint('⚠️ [MQTT] Error attaching updates listener: $e');
+        }
+
+        // Subscribe to all required data and status topics
+        _subscribeToDataTopic();
+
         // RULE 6: Send STATUS on startup
         Future.delayed(const Duration(milliseconds: 500), () {
           sendStatus();
@@ -624,7 +890,7 @@ class MqttService extends ChangeNotifier {
         _connectionController.add(true);
         notifyListeners();
         debugPrint(
-            '✅ [MQTT] Connected (Publish Only). Telemetry is retrieved via SSE Stream.');
+            '✅ [MQTT] Connected & Subscribed to telemetry and status topics.');
         return true;
       }
     } catch (e) {
@@ -642,19 +908,107 @@ class MqttService extends ChangeNotifier {
   }
 
   void _subscribeToDataTopic() {
-    if (_client == null) return;
-    final dataTopic = AppConfig.mqttDataTopic;
-    _client!.subscribe(dataTopic, MqttQos.atLeastOnce);
-    debugPrint('📨 [MQTT] Subscribed to: $dataTopic');
+    if (_client == null ||
+        _client!.connectionStatus?.state != MqttConnectionState.connected) {
+      debugPrint(
+          '⚠️ [MQTT] Skipping subscribe: socket client is not connected.');
+      return;
+    }
+    try {
+      final rootTopic = AppConfig.mqttTopic;
+      final user = AppConfig.mqttUsername;
+      final dataTopic = AppConfig.mqttDataTopic;
 
-    if (_deviceId.isNotEmpty) {
-      final statusTopic = AppConfig.getMqttStatusTopic(_deviceId);
-      _client!.subscribe(statusTopic, MqttQos.atLeastOnce);
-      debugPrint('📨 [MQTT] Subscribed to: $statusTopic');
+      final Set<String> topicsToSubscribe = {};
 
-      final irLearnTopic = AppConfig.getMqttIrLearnTopic(_deviceId);
-      _client!.subscribe(irLearnTopic, MqttQos.atLeastOnce);
-      debugPrint('📨 [MQTT] Subscribed to: $irLearnTopic');
+      // 1. SIRIS Spec Section 1 & 13 topics
+      if (rootTopic.isNotEmpty) {
+        topicsToSubscribe.add('$rootTopic/#');
+        topicsToSubscribe.add('$rootTopic/data');
+        topicsToSubscribe.add('$rootTopic/status');
+        topicsToSubscribe.add('$rootTopic/online');
+        topicsToSubscribe.add('$rootTopic/schedule');
+        topicsToSubscribe.add('$rootTopic/control');
+        topicsToSubscribe.add('$rootTopic/wifi');
+        topicsToSubscribe.add('$rootTopic/ota');
+      }
+
+      // 2. Data telemetry fallback topics
+      if (dataTopic.isNotEmpty) {
+        topicsToSubscribe.add(dataTopic);
+      }
+      if (user.isNotEmpty && user != rootTopic) {
+        topicsToSubscribe.add('$user/data');
+        topicsToSubscribe.add('$user/status');
+        topicsToSubscribe.add('$user/online');
+      }
+      topicsToSubscribe.add('+/data');
+      topicsToSubscribe.add('+/status');
+      topicsToSubscribe.add('+/online');
+      topicsToSubscribe.add('+/schedule');
+
+      // 3. Dynamic target device subscriptions
+      if (_deviceId.isNotEmpty) {
+        topicsToSubscribe.add(AppConfig.getMqttStatusTopic(_deviceId));
+        topicsToSubscribe.add(AppConfig.getMqttIrLearnTopic(_deviceId));
+        topicsToSubscribe.add(AppConfig.getMqttScheduleTopic(_deviceId));
+        topicsToSubscribe.add('$_deviceId/status');
+        topicsToSubscribe.add('$_deviceId/ir_learn');
+      }
+
+      // 4. IMEI-specific topics if different from deviceId
+      if (_imei != null && _imei!.isNotEmpty && _imei != _deviceId) {
+        topicsToSubscribe.add(AppConfig.getMqttStatusTopic(_imei!));
+        topicsToSubscribe.add(AppConfig.getMqttIrLearnTopic(_imei!));
+        topicsToSubscribe.add('$_imei/status');
+        topicsToSubscribe.add('$_imei/ir_learn');
+      }
+
+      for (final topic in topicsToSubscribe) {
+        _client!.subscribe(topic, MqttQos.atLeastOnce);
+        debugPrint('📨 [MQTT] Subscribed to: $topic');
+      }
+      debugPrint(
+          '📨 [MQTT] Subscribed dynamically to ${topicsToSubscribe.length} topics');
+    } catch (e) {
+      debugPrint('⚠️ [MQTT] Subscription error: $e');
+    }
+  }
+
+  /// Dynamically subscribe to a specific device's topics (status, ir_learn, schedule).
+  void subscribeToDevice(String deviceId, {String? topicRoot, String? imei}) {
+    if (_client == null ||
+        _client!.connectionStatus?.state != MqttConnectionState.connected) {
+      return;
+    }
+    if (deviceId.isEmpty) return;
+
+    final root = (topicRoot != null && topicRoot.isNotEmpty)
+        ? topicRoot
+        : AppConfig.mqttTopic;
+
+    final topics = <String>{
+      '$root/$deviceId/status',
+      '$root/$deviceId/ir_learn',
+      '$root/$deviceId/schedule',
+      '$deviceId/status',
+      '$deviceId/ir_learn',
+    };
+
+    if (imei != null && imei.isNotEmpty && imei != deviceId) {
+      topics.add('$root/$imei/status');
+      topics.add('$root/$imei/ir_learn');
+      topics.add('$imei/status');
+      topics.add('$imei/ir_learn');
+    }
+
+    for (final topic in topics) {
+      try {
+        _client!.subscribe(topic, MqttQos.atLeastOnce);
+        debugPrint('📨 [MQTT] Subscribed to device topic: $topic');
+      } catch (e) {
+        debugPrint('⚠️ [MQTT] Error subscribing to $topic: $e');
+      }
     }
   }
 
@@ -672,6 +1026,37 @@ class MqttService extends ChangeNotifier {
     notifyListeners();
   }
 
+  String? _extractDeviceIdFromTopic(String topic) {
+    if (topic.isEmpty) return null;
+    final cleanTopic = topic.trim();
+    final segments = cleanTopic.split('/').where((s) => s.isNotEmpty).toList();
+    if (segments.isEmpty) return null;
+
+    final knownKeywords = {
+      'data',
+      'status',
+      'online',
+      'schedule',
+      'control',
+      'wifi',
+      'ota',
+      'set_temp',
+      'ir_learn',
+      'ir',
+    };
+
+    final root = AppConfig.mqttRoot.toLowerCase();
+
+    for (int i = segments.length - 1; i >= 0; i--) {
+      final seg = segments[i];
+      final lower = seg.toLowerCase();
+      if (!knownKeywords.contains(lower) && (root.isEmpty || lower != root)) {
+        return seg;
+      }
+    }
+    return null;
+  }
+
   void _onMessage(List<MqttReceivedMessage<MqttMessage?>>? messages) {
     if (messages == null || messages.isEmpty) return;
 
@@ -684,11 +1069,26 @@ class MqttService extends ChangeNotifier {
       debugPrint(
           '📩 [MQTT] Topic: $topic | Payload: ${payload.length > 200 ? "${payload.substring(0, 200)}..." : payload}');
 
+      // Ignore echoed downlink messages on command topics (e.g. app commands reflected by broker)
+      final topicLower = topic.toLowerCase();
+      if (topicLower.endsWith('/control') ||
+          topicLower.endsWith('/schedule') ||
+          topicLower.endsWith('/wifi') ||
+          topicLower.endsWith('/ota')) {
+        debugPrint(
+            '🛡️ [MQTT] Ignoring echoed downlink command on topic: $topic');
+        continue;
+      }
+
+      final topicDeviceId = _extractDeviceIdFromTopic(topic);
+
       // Try parsing as JSON (device snapshot published every 5s)
       if (payload.trim().startsWith('{')) {
-        _handleJsonPayload(payload);
+        _handleJsonPayload(payload,
+            topic: topic, topicDeviceId: topicDeviceId);
       } else {
-        _handleStringResponse(payload.trim());
+        _handleStringResponse(payload.trim(),
+            topic: topic, explicitDeviceId: topicDeviceId);
       }
     }
   }
@@ -715,7 +1115,8 @@ class MqttService extends ChangeNotifier {
     return null;
   }
 
-  void _handleJsonPayload(String payload) {
+  void _handleJsonPayload(String payload,
+      {String? topic, String? topicDeviceId}) {
     try {
       // Fix malformed JSON
       String safePayload = payload;
@@ -726,20 +1127,67 @@ class MqttService extends ChangeNotifier {
 
       final json = jsonDecode(safePayload);
 
+      final String? jsonDeviceId = (json['deviceId'] ??
+              json['device_id'] ??
+              json['imei'] ??
+              json['targetId'] ??
+              topicDeviceId)
+          ?.toString();
+
       // Check if JSON contains an embedded IR Learn string response (e.g. from SSE/API bridge)
       final embeddedIr = _extractEmbeddedIrResponse(json);
       if (embeddedIr != null && embeddedIr.isNotEmpty) {
         debugPrint('📩 [MQTT/SSE] Extracted embedded IR response: $embeddedIr');
-        _handleStringResponse(embeddedIr);
+        _handleStringResponse(embeddedIr,
+            topic: topic, explicitDeviceId: jsonDeviceId);
       }
 
       // Check if this is a stream control/connection handshake message (no telemetry data payload)
-      if (json['data'] == null && (json['message'] != null || json['cacheStatus'] != null)) {
-        debugPrint('ℹ️ [SSE] Stream control message: ${json['message']} (cacheStatus: ${json['cacheStatus']})');
+      if (json['data'] == null &&
+          (json['message'] != null || json['cacheStatus'] != null)) {
+        debugPrint(
+            'ℹ️ [SSE] Stream control message: ${json['message']} (cacheStatus: ${json['cacheStatus']})');
         return;
       }
 
-      final state = SirisDeviceState.fromJson(json);
+      // Verify that this is an actual device telemetry / status JSON snapshot.
+      // Command payloads (e.g. {"days1":"..."}) should never be parsed as device states.
+      final bool hasTelemetryFields = json['data'] != null ||
+          json['device_id'] != null ||
+          json['deviceId'] != null ||
+          json['ac'] != null ||
+          json['set_temp'] != null ||
+          json['temp'] != null;
+
+      if (!hasTelemetryFields) {
+        debugPrint('🛡️ [MQTT] Ignoring non-telemetry JSON payload: $payload');
+        return;
+      }
+
+      Map<String, dynamic> candidate = json;
+      if (json['data'] is Map<String, dynamic>) {
+        candidate = json['data'] as Map<String, dynamic>;
+      }
+      final devId = (candidate['device_id'] ??
+              candidate['deviceId'] ??
+              json['device_id'] ??
+              json['deviceId'] ??
+              '')
+          .toString()
+          .trim();
+      final imei =
+          (candidate['imei'] ?? json['imei'] ?? '').toString().trim();
+
+      final SirisDeviceState? prev = (devId.isNotEmpty
+              ? _deviceStates[devId.toLowerCase()]
+              : null) ??
+          (imei.isNotEmpty ? _deviceStates[imei.toLowerCase()] : null) ??
+          (_deviceId.isNotEmpty
+              ? _deviceStates[_deviceId.toLowerCase()]
+              : null) ??
+          _lastState;
+
+      final state = SirisDeviceState.fromJson(json, prev);
 
       // Cache state for all devices to support instantaneous UI updates on switch
       if (state.deviceId.isNotEmpty) {
@@ -755,17 +1203,35 @@ class MqttService extends ChangeNotifier {
         }
       }
 
-      // Only accept messages from our target device
-      final bool isMatch = _deviceId.isEmpty ||
-          state.deviceId.toLowerCase() == _deviceId.toLowerCase() ||
-          state.imei.toLowerCase() == _deviceId.toLowerCase() ||
-          (_imei != null && _imei!.isNotEmpty && state.imei.toLowerCase() == _imei!.toLowerCase()) ||
-          (_imei != null && _imei!.isNotEmpty && state.deviceId.toLowerCase() == _imei!.toLowerCase()) ||
-          state.deviceId
-                  .toLowerCase()
-                  .replaceAll('_', '')
-                  .replaceAll('-', '') ==
-              _deviceId.toLowerCase().replaceAll('_', '').replaceAll('-', '');
+      // Only accept messages from our target device.
+      // Prioritize device_id matching; IMEI matching is a fallback only when
+      // the incoming device_id is empty or when IMEIs are truly unique identifiers.
+      bool isMatch = _deviceId.isEmpty;
+      if (!isMatch) {
+        final stateDevLower = state.deviceId.toLowerCase();
+        final targetLower = _deviceId.toLowerCase();
+
+        // Primary: exact device_id match (or normalized match)
+        isMatch = stateDevLower == targetLower ||
+            stateDevLower.replaceAll('_', '').replaceAll('-', '') ==
+                targetLower.replaceAll('_', '').replaceAll('-', '');
+
+        // Fallback: IMEI match, but ONLY if device_id is empty in the incoming
+        // state (i.e. we can't distinguish by device_id) AND the IMEI looks
+        // like a real identifier (not a placeholder like "numberIMEI").
+        if (!isMatch && state.deviceId.isEmpty && state.imei.isNotEmpty) {
+          final stateImei = state.imei.toLowerCase();
+          final isPlaceholderImei = stateImei == 'numberimei' ||
+              stateImei == 'imei' ||
+              stateImei == 'unknown';
+          if (!isPlaceholderImei) {
+            isMatch = stateImei == targetLower ||
+                (_imei != null &&
+                    _imei!.isNotEmpty &&
+                    stateImei == _imei!.toLowerCase());
+          }
+        }
+      }
 
       if (isMatch) {
         if (_deviceId.isNotEmpty) {
@@ -774,16 +1240,13 @@ class MqttService extends ChangeNotifier {
             _recordLastReceivedTime(_deviceId);
           }
         }
-        // Dynamically update _deviceId if it matches via substring/case/IMEI mapping,
-        // so that subsequent control publishes target the correct physical device ID.
-        // Avoid overwriting a specific device ID with the generic AppConfig.mqttDeviceId fallback.
-        final fallbackId = AppConfig.mqttDeviceId.toLowerCase();
-        if (state.deviceId.isNotEmpty &&
-            _deviceId != state.deviceId &&
-            !(state.deviceId.toLowerCase() == fallbackId &&
-                _deviceId.toLowerCase() != fallbackId)) {
-          debugPrint('🔄 [MQTT] Updating device ID from $_deviceId to ${state.deviceId} to match physical hardware');
-          _deviceId = state.deviceId;
+        // NOTE: Do NOT overwrite _deviceId from incoming telemetry.
+        // The _deviceId is set explicitly by the user's device selection in the UI.
+        // Overwriting it here caused cross-device command issues where commands
+        // intended for the selected device were sent to a different device.
+        if (state.deviceId.isNotEmpty && _deviceId != state.deviceId) {
+          debugPrint(
+              'ℹ️ [MQTT] Received data from ${state.deviceId} (current target: $_deviceId) — keeping target unchanged');
         }
 
         _lastState = state;
@@ -791,6 +1254,7 @@ class MqttService extends ChangeNotifier {
         _responseController.add(SirisResponse(
           type: SirisResponseType.jsonSnapshot,
           rawPayload: payload,
+          deviceId: state.deviceId.isNotEmpty ? state.deviceId : state.imei,
         ));
         notifyListeners();
       }
@@ -802,17 +1266,20 @@ class MqttService extends ChangeNotifier {
   void _resetSseWatchdog(String companyId, String deviceId, String? imei) {
     _sseWatchdogTimer?.cancel();
     _sseWatchdogTimer = Timer(const Duration(seconds: 25), () {
-      debugPrint('⚠️ [SSE] No data received for 25 seconds. Reconnecting SSE stream...');
+      debugPrint(
+          '⚠️ [SSE] No data received for 25 seconds. Reconnecting SSE stream...');
       _startSseStream(companyId, deviceId, imei);
     });
   }
 
-  Future<void> _startSseStream(String companyId, String deviceId, String? imei) async {
+  Future<void> _startSseStream(
+      String companyId, String deviceId, String? imei) async {
     _sseWatchdogTimer?.cancel();
     await _sseSub?.cancel();
     _isSseConnected = false;
     notifyListeners();
-    if (companyId.isEmpty || (deviceId.isEmpty && (imei == null || imei.isEmpty))) {
+    if (companyId.isEmpty ||
+        (deviceId.isEmpty && (imei == null || imei.isEmpty))) {
       return;
     }
     _resetSseWatchdog(companyId, deviceId, imei);
@@ -829,13 +1296,14 @@ class MqttService extends ChangeNotifier {
       if (imei != null && imei.isNotEmpty) {
         queryParams.add('imei=$imei');
       }
-      final uri = Uri.parse('${AppConfig.provisionBaseUrl}/mqtt/stream?${queryParams.join('&')}');
-      
+      final uri = Uri.parse(
+          '${AppConfig.provisionBaseUrl}/mqtt/stream?${queryParams.join('&')}');
+
       debugPrint('🌐 [SSE] Connecting to: $uri');
       final request = await client.getUrl(uri);
       request.headers.set('Accept', 'text/event-stream');
       request.headers.set('Cache-Control', 'no-cache');
-      
+
       final token = await AuthService.getCookieHeader();
       if (token != null) {
         request.headers.set('Authorization', 'Bearer $token');
@@ -847,7 +1315,7 @@ class MqttService extends ChangeNotifier {
         debugPrint('🟢 [SSE] Connected successfully');
         _isSseConnected = true;
         notifyListeners();
-        
+
         _sseSub = response
             .transform(utf8.decoder)
             .transform(const LineSplitter())
@@ -861,9 +1329,9 @@ class MqttService extends ChangeNotifier {
               _sseLastPayload = dataContent;
               notifyListeners();
               if (dataContent.startsWith('{')) {
-                _handleJsonPayload(dataContent);
+                _handleJsonPayload(dataContent, topicDeviceId: deviceId);
               } else {
-                _handleStringResponse(dataContent);
+                _handleStringResponse(dataContent, explicitDeviceId: deviceId);
               }
             }
           }
@@ -887,7 +1355,8 @@ class MqttService extends ChangeNotifier {
           });
         });
       } else {
-        debugPrint('❌ [SSE] Connection failed with status: ${response.statusCode}. Retrying in 5 seconds...');
+        debugPrint(
+            '❌ [SSE] Connection failed with status: ${response.statusCode}. Retrying in 5 seconds...');
         _isSseConnected = false;
         notifyListeners();
         Future.delayed(const Duration(seconds: 5), () {
@@ -897,7 +1366,8 @@ class MqttService extends ChangeNotifier {
         });
       }
     } catch (e) {
-      debugPrint('❌ [SSE] Exception starting stream: $e. Retrying in 5 seconds...');
+      debugPrint(
+          '❌ [SSE] Exception starting stream: $e. Retrying in 5 seconds...');
       _isSseConnected = false;
       notifyListeners();
       Future.delayed(const Duration(seconds: 5), () {
@@ -908,7 +1378,8 @@ class MqttService extends ChangeNotifier {
     }
   }
 
-  void _updateCachedDeviceState(String deviceId, {String? ac, int? setTemp, int? currentTemp, bool? automate}) {
+  void _updateCachedDeviceState(String deviceId,
+      {String? ac, int? setTemp, int? currentTemp, bool? automate}) {
     if (deviceId.isEmpty) return;
 
     final String lookupId = deviceId.toLowerCase();
@@ -929,12 +1400,18 @@ class MqttService extends ChangeNotifier {
           wifiNetwork: '',
           wifiRssi: 0,
           time: '',
-          schOn1: 'DISABLED', schOff1: 'DISABLED',
-          schOn2: 'DISABLED', schOff2: 'DISABLED',
-          schOn3: 'DISABLED', schOff3: 'DISABLED',
-          schOn4: 'DISABLED', schOff4: 'DISABLED',
-          schOn5: 'DISABLED', schOff5: 'DISABLED',
-          lunchOn: 'DISABLED', lunchOff: 'DISABLED',
+          schOn1: 'DISABLED',
+          schOff1: 'DISABLED',
+          schOn2: 'DISABLED',
+          schOff2: 'DISABLED',
+          schOn3: 'DISABLED',
+          schOff3: 'DISABLED',
+          schOn4: 'DISABLED',
+          schOff4: 'DISABLED',
+          schOn5: 'DISABLED',
+          schOff5: 'DISABLED',
+          lunchOn: 'DISABLED',
+          lunchOff: 'DISABLED',
           primarySsid: '',
           secondarySsid: '',
           automate: false,
@@ -964,27 +1441,41 @@ class MqttService extends ChangeNotifier {
     _lastState = updated;
     _stateController.add(updated);
     notifyListeners();
-    debugPrint('📝 [MQTT] Updated cached state for $deviceId: ac=${updated.ac}, setTemp=${updated.setTemp}');
+    debugPrint(
+        '📝 [MQTT] Updated cached state for $deviceId: ac=${updated.ac}, setTemp=${updated.setTemp}');
   }
 
-  void _handleStringResponse(String payload) {
+  void _handleStringResponse(String payload,
+      {String? topic, String? explicitDeviceId}) {
     final upper = payload.toUpperCase();
 
-    String? responseDeviceId;
+    String? responseDeviceId = explicitDeviceId;
     final parts = payload.split(':');
     if (parts.isNotEmpty && parts[0].isNotEmpty) {
       final candidate = parts[0].trim();
+      final candUpper = candidate.toUpperCase();
       if (!candidate.contains(' ') &&
-          candidate.toUpperCase() != 'TEMP_SET' &&
-          candidate.toUpperCase() != 'TEMP_PARTIAL' &&
-          candidate.toUpperCase() != 'AC_ON_DONE' &&
-          candidate.toUpperCase() != 'AC_OFF_DONE' &&
-          candidate.toUpperCase() != 'SCH_SET' &&
-          candidate.toUpperCase() != 'SCH_CLEARED' &&
-          candidate.toUpperCase() != 'CMD_REJECTED') {
+          candUpper != 'TEMP_SET' &&
+          candUpper != 'TEMP_PARTIAL' &&
+          candUpper != 'AC_ON_DONE' &&
+          candUpper != 'AC_OFF_DONE' &&
+          candUpper != 'SCH_SET' &&
+          candUpper != 'SCH_CLEARED' &&
+          candUpper != 'CMD_REJECTED' &&
+          !candUpper.startsWith('IR_LEARN') &&
+          !candUpper.startsWith('LEARN') &&
+          !candUpper.startsWith('SEND') &&
+          !candUpper.startsWith('WIFI') &&
+          !candUpper.startsWith('CLEAR') &&
+          !candUpper.startsWith('SET_')) {
         responseDeviceId = candidate;
       }
     }
+
+    if (responseDeviceId == null && topic != null) {
+      responseDeviceId = _extractDeviceIdFromTopic(topic);
+    }
+    responseDeviceId ??= _deviceId.isNotEmpty ? _deviceId : null;
 
     SirisResponse response;
 
@@ -1004,7 +1495,17 @@ class MqttService extends ChangeNotifier {
         type: SirisResponseType.acOffDone,
         rawPayload: payload,
       );
-    } else if (upper.contains('AUTO_OFF_DONE') || upper.contains('AUTO_OFF') || upper.contains('AUTO_DISABLE')) {
+    } else if (upper.contains('AUTO_OFF_DONE') ||
+        upper.contains('AUTOMATE_OFF_DONE') ||
+        upper.contains('AUTO_OFF') ||
+        upper.contains('AUTOMATE_OFF') ||
+        upper.contains('AUTOMATION_OFF') ||
+        upper.contains('AUTO_DISABLE') ||
+        upper.contains('AUTOMATE_DISABLE') ||
+        upper.contains('AUTO:OFF') ||
+        upper.contains('AUTOMATE:OFF') ||
+        (upper.contains('AUTO') && upper.contains('OFF')) ||
+        (upper.contains('AUTOMATE') && upper.contains('OFF'))) {
       if (responseDeviceId != null) {
         _updateCachedDeviceState(responseDeviceId, automate: false);
       }
@@ -1013,7 +1514,18 @@ class MqttService extends ChangeNotifier {
         rawPayload: payload,
         detail: 'OFF',
       );
-    } else if (upper.contains('AUTO_ON_DONE') || upper.contains('AUTO_ON') || upper.contains('AUTO_CFG') || upper.contains('AUTO')) {
+    } else if (upper.contains('AUTO_ON_DONE') ||
+        upper.contains('AUTOMATE_ON_DONE') ||
+        upper.contains('AUTO_ON') ||
+        upper.contains('AUTOMATE_ON') ||
+        upper.contains('AUTOMATION_ON') ||
+        upper.contains('AUTO_ENABLE') ||
+        upper.contains('AUTOMATE_ENABLE') ||
+        upper.contains('AUTO_CFG') ||
+        upper.contains('AUTO:') ||
+        upper.contains('AUTOMATE:') ||
+        upper == 'AUTO' ||
+        upper == 'AUTOMATE') {
       if (responseDeviceId != null) {
         _updateCachedDeviceState(responseDeviceId, automate: true);
       }
@@ -1059,6 +1571,32 @@ class MqttService extends ChangeNotifier {
     } else if (upper.contains('TEMP_ERR')) {
       response = SirisResponse(
         type: SirisResponseType.tempError,
+        rawPayload: payload,
+        detail: payload,
+      );
+    } else if (upper.contains('SCHEDULE_UPDATED_WITH_ERRORS')) {
+      // SIRIS 2.0: JSON schedule was applied but some days fields had bad tokens
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*SCHEDULE_UPDATED_WITH_ERRORS:?', caseSensitive: false),
+              '')
+          .trim();
+      response = SirisResponse(
+        type: SirisResponseType.scheduleUpdatedWithErrors,
+        rawPayload: payload,
+        detail: detail.isNotEmpty ? detail : payload,
+      );
+    } else if (upper.contains('SCHEDULE_UPDATED')) {
+      // SIRIS 2.0: JSON schedule was fully applied successfully
+      response = SirisResponse(
+        type: SirisResponseType.scheduleUpdated,
+        rawPayload: payload,
+        detail: payload,
+      );
+    } else if (upper.contains('SCHEDULE_ERR')) {
+      // SIRIS 2.0: JSON schedule payload was not valid JSON
+      response = SirisResponse(
+        type: SirisResponseType.scheduleError,
         rawPayload: payload,
         detail: payload,
       );
@@ -1133,6 +1671,7 @@ class MqttService extends ChangeNotifier {
         String primarySsid = '';
         String secondarySsid = '';
         String active = 'PRIMARY';
+        String wifiMac = '';
         int rssi = 0;
 
         for (final part in parts) {
@@ -1148,47 +1687,63 @@ class MqttService extends ChangeNotifier {
               active = value.toUpperCase();
             } else if (key == 'rssi') {
               rssi = int.tryParse(value) ?? 0;
+            } else if (key == 'mac' ||
+                key == 'wifi_mac' ||
+                key == 'mac_id' ||
+                key == 'bssid') {
+              wifiMac = value;
             }
           }
         }
 
-        final connectedSsid = (active == 'SECONDARY') ? secondarySsid : primarySsid;
+        final connectedSsid =
+            (active == 'SECONDARY') ? secondarySsid : primarySsid;
 
         final lookupId = responseDeviceId ?? _deviceId;
-        final baseState = _deviceStates[lookupId.toLowerCase()] ?? _lastState ?? SirisDeviceState(
-          deviceId: lookupId,
-          imei: '',
-          ac: 'OFF',
-          setTemp: 24,
-          currentTemp: 0,
-          humidity: 0,
-          irOnLearned: true,
-          irOffLearned: true,
-          status: 'ACTIVE',
-          wifiSsid: '',
-          wifiIp: '',
-          wifiNetwork: '',
-          wifiRssi: 0,
-          time: '',
-          schOn1: 'DISABLED', schOff1: 'DISABLED',
-          schOn2: 'DISABLED', schOff2: 'DISABLED',
-          schOn3: 'DISABLED', schOff3: 'DISABLED',
-          schOn4: 'DISABLED', schOff4: 'DISABLED',
-          schOn5: 'DISABLED', schOff5: 'DISABLED',
-          lunchOn: 'DISABLED', lunchOff: 'DISABLED',
-          primarySsid: '',
-          secondarySsid: '',
-          automate: false,
-        );
+        final baseState = _deviceStates[lookupId.toLowerCase()] ??
+            _lastState ??
+            SirisDeviceState(
+              deviceId: lookupId,
+              imei: '',
+              ac: 'OFF',
+              setTemp: 24,
+              currentTemp: 0,
+              humidity: 0,
+              irOnLearned: true,
+              irOffLearned: true,
+              status: 'ACTIVE',
+              wifiSsid: '',
+              wifiIp: '',
+              wifiNetwork: '',
+              wifiRssi: 0,
+              time: '',
+              schOn1: 'DISABLED',
+              schOff1: 'DISABLED',
+              schOn2: 'DISABLED',
+              schOff2: 'DISABLED',
+              schOn3: 'DISABLED',
+              schOff3: 'DISABLED',
+              schOn4: 'DISABLED',
+              schOff4: 'DISABLED',
+              schOn5: 'DISABLED',
+              schOff5: 'DISABLED',
+              lunchOn: 'DISABLED',
+              lunchOff: 'DISABLED',
+              primarySsid: '',
+              secondarySsid: '',
+              automate: false,
+            );
 
         final newState = baseState.copyWith(
-          deviceId: baseState.deviceId.isNotEmpty ? baseState.deviceId : lookupId,
+          deviceId:
+              baseState.deviceId.isNotEmpty ? baseState.deviceId : lookupId,
           status: 'ACTIVE',
           wifiSsid: connectedSsid,
           wifiNetwork: active,
           wifiRssi: rssi,
           primarySsid: primarySsid,
           secondarySsid: secondarySsid,
+          wifiMac: wifiMac.isNotEmpty ? wifiMac : baseState.wifiMac,
         );
 
         if (lookupId.isNotEmpty) {
@@ -1211,25 +1766,36 @@ class MqttService extends ChangeNotifier {
         debugPrint('❌ Error parsing WIFI_INFO: $e');
       }
     } else if (upper.contains('IR_LEARN_WAITING')) {
-      final detail = payload.replaceFirst(RegExp(r'.*IR_LEARN_WAITING:?', caseSensitive: false), '').trim();
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*IR_LEARN_WAITING:?', caseSensitive: false), '')
+          .trim();
       response = SirisResponse(
         type: SirisResponseType.irLearnWaiting,
         rawPayload: payload,
-        detail: detail,
+        detail: detail.isNotEmpty ? detail : payload,
       );
-    } else if (upper.contains('IR_LEARN_SAVED')) {
-      final detail = payload.replaceFirst(RegExp(r'.*IR_LEARN_SAVED:?', caseSensitive: false), '').trim();
+    } else if (upper.contains('IR_LEARN_SAVED') ||
+        upper.contains('IR_LEARN_CAPTURED')) {
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*IR_LEARN_(SAVED|CAPTURED):?', caseSensitive: false),
+              '')
+          .trim();
       response = SirisResponse(
         type: SirisResponseType.irLearnSaved,
         rawPayload: payload,
-        detail: detail,
+        detail: detail.isNotEmpty ? detail : payload,
       );
     } else if (upper.contains('IR_LEARN_CLEARED')) {
-      final detail = payload.replaceFirst(RegExp(r'.*IR_LEARN_CLEARED:?', caseSensitive: false), '').trim();
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*IR_LEARN_CLEARED:?', caseSensitive: false), '')
+          .trim();
       response = SirisResponse(
         type: SirisResponseType.irLearnCleared,
         rawPayload: payload,
-        detail: detail,
+        detail: detail.isNotEmpty ? detail : payload,
       );
     } else if (upper.contains('IR_LEARN_STOPPED')) {
       response = SirisResponse(
@@ -1238,18 +1804,28 @@ class MqttService extends ChangeNotifier {
         detail: 'STOPPED',
       );
     } else if (upper.contains('IR_LEARN_STATUS')) {
-      final detail = payload.replaceFirst(RegExp(r'.*IR_LEARN_STATUS:?', caseSensitive: false), '').trim();
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*IR_LEARN_STATUS:?', caseSensitive: false), '')
+          .trim();
       response = SirisResponse(
         type: SirisResponseType.irLearnStatus,
         rawPayload: payload,
-        detail: detail,
+        detail: detail.isNotEmpty ? detail : payload,
       );
-    } else if (upper.contains('IR_LEARN_ERR')) {
-      final detail = payload.replaceFirst(RegExp(r'.*IR_LEARN_ERR:?', caseSensitive: false), '').trim();
+    } else if (upper.contains('IR_LEARN_CAPTURE_FAILED') ||
+        upper.contains('IR_LEARN_TIMEOUT') ||
+        upper.contains('IR_LEARN_ERR')) {
+      final detail = payload
+          .replaceFirst(
+              RegExp(r'.*IR_LEARN_(CAPTURE_FAILED|TIMEOUT|ERR):?',
+                  caseSensitive: false),
+              '')
+          .trim();
       response = SirisResponse(
         type: SirisResponseType.irLearnError,
         rawPayload: payload,
-        detail: detail,
+        detail: detail.isNotEmpty ? detail : payload,
       );
     } else if (upper.contains('WIFI_ROLLBACK')) {
       final detail = payload.split(':').last.trim();
@@ -1272,178 +1848,311 @@ class MqttService extends ChangeNotifier {
       );
     }
 
-    _responseController.add(response);
+    final taggedResponse = response.deviceId != null
+        ? response
+        : SirisResponse(
+            type: response.type,
+            rawPayload: response.rawPayload,
+            detail: response.detail,
+            deviceId: responseDeviceId,
+          );
+
+    _responseController.add(taggedResponse);
   }
 
   // ── Publish Methods (RULE 1: retain=false, RULE 2: plain text only) ──
 
+  String? _lastPublishedTopic;
+  String? _lastPublishedMessage;
+  DateTime? _lastPublishedTime;
+
   /// Publish a raw message to a topic. Retain is ALWAYS false.
+  /// Uses MqttQos.atMostOnce (QoS 0) to guarantee the packet is delivered strictly ONCE without duplicates.
   Future<bool> _publish(String topic, String message) async {
+    final now = DateTime.now();
+    final isSteppingCmd = message == 'TEMP_UP' || message == 'TEMP_DOWN';
+    if (!isSteppingCmd &&
+        _lastPublishedTopic == topic &&
+        _lastPublishedMessage == message &&
+        _lastPublishedTime != null &&
+        now.difference(_lastPublishedTime!).inMilliseconds < 1500) {
+      debugPrint(
+          '🛡️ [MQTT] Suppressed duplicate publish within 1500ms to $topic: $message');
+      return true;
+    }
+    _lastPublishedTopic = topic;
+    _lastPublishedMessage = message;
+    _lastPublishedTime = now;
+
+    if (_client == null ||
+        _client!.connectionStatus?.state != MqttConnectionState.connected) {
+      debugPrint(
+          '📡 [MQTT] Socket client not connected. Attempting auto-reconnect before publish...');
+      await connect(deviceId: _deviceId.isNotEmpty ? _deviceId : '');
+    }
+
     bool published = false;
     if (_client != null &&
         _client!.connectionStatus?.state == MqttConnectionState.connected) {
       try {
         final builder = MqttClientPayloadBuilder();
         builder.addString(message);
-        _client!.publishMessage(topic, MqttQos.atLeastOnce, builder.payload!,
+        _client!.publishMessage(topic, MqttQos.atMostOnce, builder.payload!,
             retain: false);
-        debugPrint('📤 [MQTT] Published via socket to $topic: $message');
+        debugPrint(
+            '📤 [MQTT] Published via socket to $topic: $message (QoS 0, 1 time only)');
         published = true;
       } catch (e) {
         debugPrint('⚠️ [MQTT] Socket publish error: $e');
       }
     }
 
-    // HTTP POST fallback if direct MQTT socket is not connected
-    if (!published) {
-      try {
-        final token = await AuthService.getCookieHeader();
-        final url = '${AppConfig.provisionBaseUrl}/mqtt/publish';
-        final resp = await http.post(
-          Uri.parse(url),
-          headers: {
-            'Content-Type': 'application/json',
-            if (token != null) 'Authorization': 'Bearer $token',
-            if (token != null) 'Cookie': 'auth_token=$token',
-          },
-          body: jsonEncode({
-            'topic': topic,
-            'payload': message,
-            'deviceId': _deviceId,
-          }),
-        ).timeout(const Duration(seconds: 4));
-
-        if (resp.statusCode == 200) {
-          debugPrint('📤 [HTTP/MQTT] Published via HTTP proxy to $topic: $message');
-          published = true;
-        } else {
-          debugPrint('⚠️ [HTTP/MQTT] Proxy return code ${resp.statusCode}: ${resp.body}');
-        }
-      } catch (e) {
-        debugPrint('⚠️ [HTTP/MQTT] HTTP publish fallback error: $e');
-      }
-    }
-
     return published;
   }
 
-  /// Send a custom control command to the ir_learn and control topics (e.g. LEARN_*, CLEAR_*).
-  Future<void> sendControlCommand(String command) async {
-    debugPrint('📡 [MQTT] Sending IR Learn/Control command: $command for device: $_deviceId');
+  /// Send a custom control command to the control topic.
+  /// Intelligently routes commands:
+  /// - For sub-devices (e.g. Sustainabyte_testir): publishes ONLY to dedicated sub-device topics.
+  /// - For root/primary devices (e.g. Sustainabyte_ITir / Sustainabyte_ir): publishes to root topic and device aliases.
+  Future<void> sendControlCommand(String command,
+      {String? targetDeviceId}) async {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint(
+        '📡 [MQTT] Sending Control command: $command for device: $devId');
     if (isBluetoothConnected) {
-      sendBluetoothCommand('SEND:$command');
       sendBluetoothCommand(command);
     } else {
-      // 1. PRIMARY: ir_learn topic (e.g. testir/Sustainabyte_ITir/ir_learn)
-      final irLearnTopic = AppConfig.getMqttIrLearnTopic(_deviceId);
-      await _publish(irLearnTopic, command);
+      final rootControlTopic = AppConfig.mqttRoot.isNotEmpty
+          ? '${AppConfig.mqttRoot}/control'
+          : 'control';
+      final devControlTopic = AppConfig.getMqttControlTopic(devId);
+      final directTopic = '$devId/control';
 
-      // 2. Direct device id ir_learn topic
-      if (_deviceId.isNotEmpty) {
-        final directIrTopic = '$_deviceId/ir_learn';
-        if (directIrTopic != irLearnTopic) {
-          await _publish(directIrTopic, command);
+      final lowerDev = devId.toLowerCase().trim();
+      final isSubDevice = lowerDev.contains('test');
+
+      if (isSubDevice) {
+        // Dedicated sub-device (e.g. Sustainabyte_testir):
+        // Only publish to its device-specific control topic so the root device (ITir) does NOT execute it!
+        await _publish(devControlTopic, command);
+        if (directTopic.toLowerCase() != devControlTopic.toLowerCase()) {
+          await _publish(directTopic, command);
         }
-      }
-
-      // 3. Fallback control topics
-      final controlTopic = AppConfig.getMqttControlTopic(_deviceId);
-      if (controlTopic != irLearnTopic) {
-        await _publish(controlTopic, command);
-      }
-
-      final altControlTopic = '${AppConfig.mqttTopic}/control';
-      if (altControlTopic != irLearnTopic && altControlTopic != controlTopic) {
-        await _publish(altControlTopic, command);
+      } else {
+        // Root / primary device (e.g. Sustainabyte_ITir / Sustainabyte_ir):
+        // Publish to root control topic (firmware listens here) AND device-specific topics!
+        await _publish(rootControlTopic, command);
+        if (devControlTopic.toLowerCase() != rootControlTopic.toLowerCase()) {
+          await _publish(devControlTopic, command);
+        }
+        if (directTopic.toLowerCase() != rootControlTopic.toLowerCase() &&
+            directTopic.toLowerCase() != devControlTopic.toLowerCase()) {
+          await _publish(directTopic, command);
+        }
+        // Also publish to alias with "IT" if devId is Sustainabyte_ir or shortId
+        if (lowerDev == 'sustainabyte_ir' || lowerDev == 'acacsustai') {
+          final itTopic = AppConfig.mqttRoot.isNotEmpty
+              ? '${AppConfig.mqttRoot}/Sustainabyte_ITir/control'
+              : 'Sustainabyte_ITir/control';
+          await _publish(itTopic, command);
+          await _publish('Sustainabyte_ITir/control', command);
+        }
       }
     }
   }
 
-  // ── AC Power Control ──────────────────────────────────────────────────
+  // ── AC Power Control (Spec Section 2) ─────────────────────────────────
 
   /// Turn AC ON.
-  void turnAcOn() {
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SEND:ON');
-    } else {
-      final topic = AppConfig.getMqttControlTopic(_deviceId);
-      _publish(topic, 'ON');
-    }
+  /// Spec Section 2: Topic <root>/<deviceId>/control, Payload: ON
+  void turnAcOn({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('⚡ [MQTT] Turn AC ON for device: $devId');
+    sendControlCommand('ON', targetDeviceId: devId);
   }
 
   /// Turn AC OFF.
-  void turnAcOff() {
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SEND:OFF');
-    } else {
-      final topic = AppConfig.getMqttControlTopic(_deviceId);
-      _publish(topic, 'OFF');
-    }
+  /// Spec Section 2: Topic <root>/<deviceId>/control, Payload: OFF
+  void turnAcOff({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('🔌 [MQTT] Turn AC OFF for device: $devId');
+    sendControlCommand('OFF', targetDeviceId: devId);
   }
 
   /// Request device STATUS.
-  void sendStatus() {
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('STATUS');
-    } else {
-      final topic = AppConfig.getMqttControlTopic(_deviceId);
-      _publish(topic, 'STATUS');
+  /// Spec Section 2: Topic <root>/<deviceId>/control, Payload: STATUS
+  void sendStatus({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('📡 [MQTT] Requesting STATUS for device: $devId');
+    sendControlCommand('STATUS', targetDeviceId: devId);
+  }
+
+  // ── Automate Commands (Spec Section 4) ────────────────────────────────
+
+  /// Enable smart automation with target temperature (Range: 16–30°C).
+  void enableAutomation({int? autoTemp, String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    final cmd = (autoTemp != null && autoTemp >= 16 && autoTemp <= 30)
+        ? 'AUTO:$autoTemp'
+        : 'AUTO';
+    debugPrint(
+        '🤖 [MQTT] Enabling automation: $cmd (device: $devId)');
+    sendControlCommand(cmd, targetDeviceId: devId);
+    if (devId.isNotEmpty) {
+      _updateCachedDeviceState(devId, automate: true);
     }
   }
 
-  /// Enable smart automation.
-  void enableAutomation() {
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SEND:AUTO');
-    } else {
-      final topic = AppConfig.getMqttControlTopic(_deviceId);
-      _publish(topic, 'AUTO');
-    }
+  /// Set or update dynamic Auto Mode temperature threshold (e.g. AUTO:22).
+  void setAutoTemperature(int temp, {String? targetDeviceId}) {
+    enableAutomation(autoTemp: temp, targetDeviceId: targetDeviceId);
   }
 
   /// Disable smart automation.
-  void disableAutomation() {
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SEND:AUTO_OFF');
-    } else {
-      final topic = AppConfig.getMqttControlTopic(_deviceId);
-      _publish(topic, 'AUTO_OFF');
+  void disableAutomation({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint(
+        '🤖 [MQTT] Disabling automation: AUTO_OFF (device: $devId)');
+    sendControlCommand('AUTO_OFF', targetDeviceId: devId);
+    if (devId.isNotEmpty) {
+      _updateCachedDeviceState(devId, automate: false);
     }
   }
 
-  // ── Temperature Control (RULE 12: integer only) ───────────────────────
+  // ── Temperature Control (Spec Section 3) ──────────────────────────────
 
-  /// Set temperature (16–30, integer only).
-  /// Publishes to ALL known command paths to ensure firmware compatibility:
-  ///   1. Plain integer to control topic (same as ON/OFF — primary path)
-  ///   2. Plain integer to control/set_temp sub-topic (SIRIS spec)
-  ///   3. TEMP_CN:<int> to control topic (legacy firmware format)
-  void setTemperature(int temp) {
+  /// Set temperature (Range: 16 to 30 C).
+  void setTemperature(int temp, {String? targetDeviceId}) {
     if (temp < 16 || temp > 30) {
-      debugPrint('⚠️ Temperature out of range: $temp');
+      debugPrint('⚠️ Temperature out of range (16-30): $temp');
       return;
     }
 
+    final devId = targetDeviceId ?? _deviceId;
     if (isBluetoothConnected) {
       sendBluetoothCommand('SEND:TEMP_$temp');
     } else {
-      final ctrlTopic = AppConfig.getMqttControlTopic(_deviceId);
-      final tempTopic = AppConfig.getMqttTempTopic(_deviceId);
+      sendControlCommand('TEMP:$temp', targetDeviceId: devId);
 
-      // 1. PRIMARY: Plain integer on the control topic (device subscribes here for ON/OFF/STATUS)
-      _publish(ctrlTopic, '$temp');
+      final rootTempTopic = AppConfig.mqttRoot.isNotEmpty
+          ? '${AppConfig.mqttRoot}/control/set_temp'
+          : 'control/set_temp';
+      final devTempTopic = AppConfig.getMqttTempTopic(devId);
+      final directTempTopic = '$devId/control/set_temp';
 
-      // 2. SIRIS spec: Plain integer on the dedicated set_temp sub-topic
-      _publish(tempTopic, '$temp');
+      final lowerDev = devId.toLowerCase().trim();
+      final isSubDevice = lowerDev.contains('test');
 
-      // 3. Legacy format: TEMP_CN:<int> on control topic (some firmware versions)
-      _publish(ctrlTopic, 'TEMP_CN:$temp');
+      if (isSubDevice) {
+        _publish(devTempTopic, '$temp');
+        if (directTempTopic.toLowerCase() != devTempTopic.toLowerCase()) {
+          _publish(directTempTopic, '$temp');
+        }
+      } else {
+        _publish(rootTempTopic, '$temp');
+        if (devTempTopic.toLowerCase() != rootTempTopic.toLowerCase()) {
+          _publish(devTempTopic, '$temp');
+        }
+        if (directTempTopic.toLowerCase() != rootTempTopic.toLowerCase() &&
+            directTempTopic.toLowerCase() != devTempTopic.toLowerCase()) {
+          _publish(directTempTopic, '$temp');
+        }
+        if (lowerDev == 'sustainabyte_ir' || lowerDev == 'acacsustai') {
+          final itTempTopic = AppConfig.mqttRoot.isNotEmpty
+              ? '${AppConfig.mqttRoot}/Sustainabyte_ITir/control/set_temp'
+              : 'Sustainabyte_ITir/control/set_temp';
+          _publish(itTempTopic, '$temp');
+          _publish('Sustainabyte_ITir/control/set_temp', '$temp');
+        }
+      }
 
-      debugPrint('🌡️ [MQTT] Temperature $temp sent to 3 paths for $_deviceId');
+      debugPrint('🌡️ [MQTT] Temperature $temp sent for $devId');
     }
   }
 
+  /// Send TEMPERATURE UP command.
+  void tempUp({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('🌡️ [MQTT] Temperature UP (device: $devId)');
+    final currentState = getLastStateFor(devId) ?? _lastState;
+    if (currentState != null && currentState.setTemp < 30) {
+      _updateCachedDeviceState(devId, setTemp: currentState.setTemp + 1);
+    }
+    sendControlCommand('TEMP_UP', targetDeviceId: devId);
+  }
+
+  /// Send TEMPERATURE DOWN command.
+  void tempDown({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('🌡️ [MQTT] Temperature DOWN (device: $devId)');
+    final currentState = getLastStateFor(devId) ?? _lastState;
+    if (currentState != null && currentState.setTemp > 16) {
+      _updateCachedDeviceState(devId, setTemp: currentState.setTemp - 1);
+    }
+    sendControlCommand('TEMP_DOWN', targetDeviceId: devId);
+  }
+
+  /// Reset / Clear temperature to 24°C default.
+  void tempClear({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('🌡️ [MQTT] Temperature CLEAR to 24°C (device: $devId)');
+    sendControlCommand('TEMP_CLEAR', targetDeviceId: devId);
+  }
+
   // ── Schedule Control (RULE 11: HH:MM format, RULE 3: never send DISABLED) ─
+
+  static const List<String> supportedScheduleDays = [
+    'MON',
+    'TUE',
+    'WED',
+    'THU',
+    'FRI',
+    'SAT',
+    'SUN'
+  ];
+
+  String _formatScheduleDays(String? days) {
+    if (days == null || days.trim().isEmpty) {
+      return supportedScheduleDays.join(',');
+    }
+    final upper = days.toUpperCase().trim();
+    if (upper == 'ALL' || upper == 'DAILY' || upper == 'EVERYDAY') {
+      return supportedScheduleDays.join(',');
+    }
+    final tokens = upper.split(',').map((t) => t.trim()).toSet();
+    final valid =
+        supportedScheduleDays.where((d) => tokens.contains(d)).toList();
+    if (valid.isEmpty || valid.length == 7) {
+      return supportedScheduleDays.join(',');
+    }
+    return valid.join(',');
+  }
+
+  String _resolveScheduleDeviceId(String? targetDeviceId) {
+    if (targetDeviceId != null && targetDeviceId.isNotEmpty)
+      return targetDeviceId;
+    if (_deviceId.isNotEmpty) return _deviceId;
+    return AppConfig.mqttDeviceId;
+  }
+
+  void _publishToScheduleTopics(String devId, String command) {
+    final primaryTopic = AppConfig.getMqttScheduleTopic(devId);
+    _publish(primaryTopic, command);
+
+    final directTopic = '$devId/schedule';
+    if (directTopic.toLowerCase() != primaryTopic.toLowerCase()) {
+      _publish(directTopic, command);
+    }
+
+    final root = AppConfig.mqttTopic;
+    if (root.isNotEmpty && devId.isNotEmpty) {
+      final rootDevTopic = '$root/$devId/schedule';
+      if (rootDevTopic.toLowerCase() != primaryTopic.toLowerCase() &&
+          rootDevTopic.toLowerCase() != directTopic.toLowerCase()) {
+        _publish(rootDevTopic, command);
+      }
+    }
+  }
 
   /// Optimistically update a schedule slot in local state and emit to stream.
   /// This ensures the UI reflects the change immediately without waiting for
@@ -1452,6 +2161,7 @@ class MqttService extends ChangeNotifier {
     int? slot,
     String? onTime,
     String? offTime,
+    String? days,
     bool clear = false,
   }) {
     if (_lastState == null) return;
@@ -1464,20 +2174,26 @@ class MqttService extends ChangeNotifier {
       } else {
         if (onTime != null) updates['schOn$slot'] = onTime;
         if (offTime != null) updates['schOff$slot'] = offTime;
+        if (days != null) updates['schDays$slot'] = days;
       }
     }
 
     final updated = _lastState!.copyWith(
       schOn1: updates['schOn1'],
       schOff1: updates['schOff1'],
+      schDays1: updates['schDays1'],
       schOn2: updates['schOn2'],
       schOff2: updates['schOff2'],
+      schDays2: updates['schDays2'],
       schOn3: updates['schOn3'],
       schOff3: updates['schOff3'],
+      schDays3: updates['schDays3'],
       schOn4: updates['schOn4'],
       schOff4: updates['schOff4'],
+      schDays4: updates['schDays4'],
       schOn5: updates['schOn5'],
       schOff5: updates['schOff5'],
+      schDays5: updates['schDays5'],
     );
 
     _lastState = updated;
@@ -1493,6 +2209,7 @@ class MqttService extends ChangeNotifier {
   void updateLunchOptimistic({
     String? lunchOn,
     String? lunchOff,
+    String? days,
     bool clear = false,
   }) {
     if (_lastState == null) return;
@@ -1500,6 +2217,7 @@ class MqttService extends ChangeNotifier {
     final updated = _lastState!.copyWith(
       lunchOn: clear ? 'DISABLED' : (lunchOn ?? _lastState!.lunchOn),
       lunchOff: clear ? 'DISABLED' : (lunchOff ?? _lastState!.lunchOff),
+      lunchDays: clear ? 'ALL' : (days ?? _lastState!.lunchDays),
     );
 
     _lastState = updated;
@@ -1510,6 +2228,184 @@ class MqttService extends ChangeNotifier {
     _stateController.add(updated);
     notifyListeners();
     debugPrint('📅 [MQTT] Optimistic lunch update emitted');
+  }
+
+  /// SIRIS 2.0 — Publish a JSON schedule payload to <root>/<deviceId>/schedule.
+  /// Only sends fields that have changed. Supports on1..on5, off1..off5, days1..days5,
+  /// lunch_on, lunch_off, lunch_days, and set_temp.
+  ///
+  /// Example payload: {"on1":"08:30","off1":"18:00","days1":"MON,TUE,WED,THU,FRI"}
+  ///
+  /// IMPORTANT: field name typos are silently dropped by firmware with zero feedback.
+  /// This method validates and normalizes field names and values before publishing.
+  Future<bool> publishScheduleJson(Map<String, dynamic> schedulePayload,
+      {String? targetDeviceId}) async {
+    if (schedulePayload.isEmpty) {
+      debugPrint('⚠️ [MQTT] Empty schedule payload — nothing to publish');
+      return false;
+    }
+
+    // Validate field names client-side (firmware silently ignores typos)
+    const validFields = {
+      'set_temp',
+      'on1',
+      'off1',
+      'days1',
+      'on2',
+      'off2',
+      'days2',
+      'on3',
+      'off3',
+      'days3',
+      'on4',
+      'off4',
+      'days4',
+      'on5',
+      'off5',
+      'days5',
+      'lunch_on',
+      'lunch_off',
+      'lunch_days',
+    };
+
+    final invalidFields =
+        schedulePayload.keys.where((k) => !validFields.contains(k)).toList();
+    if (invalidFields.isNotEmpty) {
+      debugPrint(
+          '⚠️ [MQTT] WARNING: Invalid field names detected and removed: $invalidFields');
+      for (final f in invalidFields) {
+        schedulePayload.remove(f);
+      }
+    }
+
+    // Spec Section 3.5: set_temp (int, 16–30°C)
+    if (schedulePayload.containsKey('set_temp')) {
+      final val = int.tryParse(schedulePayload['set_temp'].toString());
+      if (val != null) {
+        schedulePayload['set_temp'] = val.clamp(16, 30);
+      }
+    }
+
+    // Spec Section 3.5: on1..on5, off1..off5, lunch_on, lunch_off (string HH:MM)
+    const timeKeys = [
+      'on1',
+      'off1',
+      'on2',
+      'off2',
+      'on3',
+      'off3',
+      'on4',
+      'off4',
+      'on5',
+      'off5',
+      'lunch_on',
+      'lunch_off'
+    ];
+    for (final timeKey in timeKeys) {
+      if (schedulePayload.containsKey(timeKey)) {
+        final val = schedulePayload[timeKey]?.toString().trim();
+        if (val != null && val != 'DISABLED' && val != '--:--') {
+          final normalized = _normalizeTime(val);
+          if (normalized != null) {
+            schedulePayload[timeKey] = normalized;
+          }
+        }
+      }
+    }
+
+    // Spec Section 3.5: days1..days5, lunch_days (comma-separated days or ALL)
+    const dayKeys = ['days1', 'days2', 'days3', 'days4', 'days5', 'lunch_days'];
+    for (final dayKey in dayKeys) {
+      if (schedulePayload.containsKey(dayKey)) {
+        final val = schedulePayload[dayKey]?.toString().trim().toUpperCase();
+        if (val == 'ALL' || val == 'DAILY' || val == 'EVERYDAY') {
+          schedulePayload[dayKey] = 'ALL';
+        } else if (val != null && val != 'DISABLED') {
+          schedulePayload[dayKey] = _formatScheduleDays(val);
+        }
+      }
+    }
+
+    if (schedulePayload.isEmpty) {
+      debugPrint('⚠️ [MQTT] All fields were invalid — nothing to publish');
+      return false;
+    }
+
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    final jsonStr = jsonEncode(schedulePayload);
+
+    // Section 3.5 Spec: Primary topic for SIRIS 2.0 JSON mode is <root>/<deviceId>/schedule
+    final primaryJsonTopic = AppConfig.getMqttJsonScheduleTopic(devId);
+    debugPrint(
+        '📅 [MQTT] Publishing SIRIS 2.0 schedule JSON to $primaryJsonTopic: $jsonStr');
+    final ok = await _publish(primaryJsonTopic, jsonStr);
+
+    final directTopic = '$devId/schedule';
+    if (directTopic.toLowerCase() != primaryJsonTopic.toLowerCase()) {
+      _publish(directTopic, jsonStr);
+    }
+
+    final rootTopic = AppConfig.getMqttScheduleTopic(devId);
+    if (rootTopic.toLowerCase() != primaryJsonTopic.toLowerCase() &&
+        rootTopic.toLowerCase() != directTopic.toLowerCase()) {
+      _publish(rootTopic, jsonStr);
+    }
+
+    return ok;
+  }
+
+  /// Optimistically update all schedule and lunch slots at once (for the new Calendar page).
+  void updateFullScheduleOptimistic({
+    String? schOn1,
+    String? schOff1,
+    String? schDays1,
+    String? schOn2,
+    String? schOff2,
+    String? schDays2,
+    String? schOn3,
+    String? schOff3,
+    String? schDays3,
+    String? schOn4,
+    String? schOff4,
+    String? schDays4,
+    String? schOn5,
+    String? schOff5,
+    String? schDays5,
+    String? lunchOn,
+    String? lunchOff,
+    String? lunchDays,
+  }) {
+    if (_lastState == null) return;
+
+    final updated = _lastState!.copyWith(
+      schOn1: schOn1,
+      schOff1: schOff1,
+      schDays1: schDays1,
+      schOn2: schOn2,
+      schOff2: schOff2,
+      schDays2: schDays2,
+      schOn3: schOn3,
+      schOff3: schOff3,
+      schDays3: schDays3,
+      schOn4: schOn4,
+      schOff4: schOff4,
+      schDays4: schDays4,
+      schOn5: schOn5,
+      schOff5: schOff5,
+      schDays5: schDays5,
+      lunchOn: lunchOn,
+      lunchOff: lunchOff,
+      lunchDays: lunchDays,
+    );
+
+    _lastState = updated;
+    final lookupId = updated.deviceId.toLowerCase();
+    if (lookupId.isNotEmpty) {
+      _deviceStates[lookupId] = updated;
+    }
+    _stateController.add(updated);
+    notifyListeners();
+    debugPrint('📅 [MQTT] Full optimistic schedule update emitted');
   }
 
   String? _normalizeTime(String time) {
@@ -1526,209 +2422,353 @@ class MqttService extends ChangeNotifier {
   }
 
   /// Set a schedule ON time. [slot] is 1–5, [time] is "HH:MM" (24hr, zero-padded).
-  void setScheduleOn(int slot, String time) {
+  /// Supports:
+  ///   - Daily Schedule: SCH_ON<slot>:<HH:MM> (Spec Section 6)
+  ///   - One-Time Date Schedule: SCH_ON<slot>:<YYYY-MM-DD>,<HH:MM> (Spec Section 7)
+  ///   - Weekly Schedule: SCH_ON<slot>:<DAYS>,<HH:MM> (Spec Section 8)
+  void setScheduleOn(int slot, String time,
+      {String? days, String? date, String? targetDeviceId}) {
     final normalized = _normalizeTime(time);
     if (normalized == null) return;
-    debugPrint('📅 [MQTT] Setting Schedule ON slot $slot -> $normalized');
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SCH_ON$slot:$normalized');
+    String cmd;
+    if (date != null && RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(date)) {
+      cmd = 'SCH_ON$slot:$date,$normalized';
+    } else if (days != null && days.isNotEmpty && days != 'ALL') {
+      final formattedDays = _formatScheduleDays(days);
+      cmd = 'SCH_ON$slot:$formattedDays,$normalized';
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'SCH_ON$slot:$normalized');
+      cmd = 'SCH_ON$slot:$normalized';
+    }
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint(
+        '📅 [MQTT] Setting Schedule ON slot $slot -> $cmd (device: $devId)');
+    if (isBluetoothConnected) {
+      sendBluetoothCommand(cmd);
+    } else {
+      _publishToScheduleTopics(devId, cmd);
     }
   }
 
   /// Set a schedule OFF time. [slot] is 1–5, [time] is "HH:MM".
-  void setScheduleOff(int slot, String time) {
+  /// Supports:
+  ///   - Daily Schedule: SCH_OFF<slot>:<HH:MM> (Spec Section 6)
+  ///   - One-Time Date Schedule: SCH_OFF<slot>:<YYYY-MM-DD>,<HH:MM> (Spec Section 7)
+  ///   - Weekly Schedule: SCH_OFF<slot>:<DAYS>,<HH:MM> (Spec Section 8)
+  void setScheduleOff(int slot, String time,
+      {String? days, String? date, String? targetDeviceId}) {
     final normalized = _normalizeTime(time);
     if (normalized == null) return;
-    debugPrint('📅 [MQTT] Setting Schedule OFF slot $slot -> $normalized');
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('SCH_OFF$slot:$normalized');
+    String cmd;
+    if (date != null && RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(date)) {
+      cmd = 'SCH_OFF$slot:$date,$normalized';
+    } else if (days != null && days.isNotEmpty && days != 'ALL') {
+      final formattedDays = _formatScheduleDays(days);
+      cmd = 'SCH_OFF$slot:$formattedDays,$normalized';
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'SCH_OFF$slot:$normalized');
+      cmd = 'SCH_OFF$slot:$normalized';
+    }
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint(
+        '📅 [MQTT] Setting Schedule OFF slot $slot -> $cmd (device: $devId)');
+    if (isBluetoothConnected) {
+      sendBluetoothCommand(cmd);
+    } else {
+      _publishToScheduleTopics(devId, cmd);
     }
   }
 
   /// Set lunch ON time.
-  void setLunchOn(String time) {
+  /// Spec Section 9: LUNCH_ON:13:00 or LUNCH_ON:MON,WED,FRI,13:00
+  void setLunchOn(String time, {String? days, String? targetDeviceId}) {
     final normalized = _normalizeTime(time);
     if (normalized == null) return;
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('LUNCH_ON:$normalized');
+    String cmd;
+    if (days != null && days.isNotEmpty && days != 'ALL') {
+      final formattedDays = _formatScheduleDays(days);
+      cmd = 'LUNCH_ON:$formattedDays,$normalized';
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'LUNCH_ON:$normalized');
+      cmd = 'LUNCH_ON:$normalized';
+    }
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Setting Lunch ON -> $cmd (device: $devId)');
+    if (isBluetoothConnected) {
+      sendBluetoothCommand(cmd);
+    } else {
+      _publishToScheduleTopics(devId, cmd);
     }
   }
 
   /// Set lunch OFF time.
-  void setLunchOff(String time) {
+  /// Spec Section 9: LUNCH_OFF:14:00 or LUNCH_OFF:MON,WED,FRI,14:00
+  void setLunchOff(String time, {String? days, String? targetDeviceId}) {
     final normalized = _normalizeTime(time);
     if (normalized == null) return;
-    if (isBluetoothConnected) {
-      sendBluetoothCommand('LUNCH_OFF:$normalized');
+    String cmd;
+    if (days != null && days.isNotEmpty && days != 'ALL') {
+      final formattedDays = _formatScheduleDays(days);
+      cmd = 'LUNCH_OFF:$formattedDays,$normalized';
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'LUNCH_OFF:$normalized');
+      cmd = 'LUNCH_OFF:$normalized';
+    }
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Setting Lunch OFF -> $cmd (device: $devId)');
+    if (isBluetoothConnected) {
+      sendBluetoothCommand(cmd);
+    } else {
+      _publishToScheduleTopics(devId, cmd);
     }
   }
 
-  // ── Schedule Clear ────────────────────────────────────────────────────
+  // ── Schedule Clear (Spec Section 10) ──────────────────────────────────
 
   /// Clear ALL schedule slots at once.
-  void clearAllSchedules() {
-    debugPrint('📅 [MQTT] Clearing ALL schedules');
+  /// Spec Section 10: Payload SCH_CLEAR
+  void clearAllSchedules({String? targetDeviceId}) {
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Clearing ALL schedules (device: $devId)');
     if (isBluetoothConnected) {
       sendBluetoothCommand('SCH_CLEAR');
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'SCH_CLEAR');
+      _publishToScheduleTopics(devId, 'SCH_CLEAR');
     }
   }
 
   /// Clear a specific schedule slot (1–5).
-  void clearScheduleSlot(int slot) {
-    debugPrint('📅 [MQTT] Clearing schedule slot $slot');
+  /// Spec Section 10: Payload SCH_CLEAR1 .. SCH_CLEAR5
+  void clearScheduleSlot(int slot, {String? targetDeviceId}) {
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Clearing schedule slot $slot (device: $devId)');
     if (isBluetoothConnected) {
       sendBluetoothCommand('SCH_CLEAR$slot');
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'SCH_CLEAR$slot');
+      _publishToScheduleTopics(devId, 'SCH_CLEAR$slot');
     }
   }
 
   /// Clear the lunch slot.
-  void clearLunchSlot() {
+  /// Spec Section 10: Payload SCH_CLEAR_LUNCH
+  void clearLunchSlot({String? targetDeviceId}) {
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Clearing lunch slot (device: $devId)');
     if (isBluetoothConnected) {
       sendBluetoothCommand('SCH_CLEAR_LUNCH');
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'SCH_CLEAR_LUNCH');
+      _publishToScheduleTopics(devId, 'SCH_CLEAR_LUNCH');
     }
   }
 
   /// Get current schedule state.
-  void getScheduleStatus() {
-    debugPrint('📅 [MQTT] Requesting schedule STATUS');
+  /// Spec Section 10: Payload STATUS
+  void getScheduleStatus({String? targetDeviceId}) {
+    final devId = _resolveScheduleDeviceId(targetDeviceId);
+    debugPrint('📅 [MQTT] Requesting schedule STATUS (device: $devId)');
     if (isBluetoothConnected) {
       sendBluetoothCommand('SCH_STATUS');
     } else {
-      final topic = AppConfig.getMqttScheduleTopic(_deviceId);
-      _publish(topic, 'STATUS');
+      _publishToScheduleTopics(devId, 'STATUS');
     }
   }
 
-  // ── WiFi Configuration & Reset ────────────────────────────────────────
+  // ── WiFi Configuration & Commands (Spec Section 11) ───────────────────
+
+  /// Internal router for WiFi MQTT commands to ensure commands route strictly
+  /// to the intended sub-device or root device without cross-talk.
+  Future<void> _publishWifiCommand(String payload, {String? targetDeviceId}) async {
+    final devId = targetDeviceId ?? _deviceId;
+    debugPrint('📡 [MQTT] Sending WiFi command: $payload for device: $devId');
+    final root = AppConfig.mqttRoot;
+    final rootWifiTopic = root.isNotEmpty ? '$root/wifi' : 'wifi';
+    final devWifiTopic = AppConfig.getMqttWifiTopic(devId);
+    final directTopic = '$devId/wifi';
+
+    final lowerDev = devId.toLowerCase().trim();
+    final isSubDevice = lowerDev.contains('test');
+
+    if (isSubDevice) {
+      // Sub-device (e.g. Sustainabyte_testir): strictly isolated
+      await _publish(devWifiTopic, payload);
+      if (directTopic.toLowerCase() != devWifiTopic.toLowerCase()) {
+        await _publish(directTopic, payload);
+      }
+    } else {
+      // Root / primary device (e.g. Sustainabyte_ITir / Sustainabyte_ir / acacsustai)
+      await _publish(rootWifiTopic, payload);
+      if (devWifiTopic.toLowerCase() != rootWifiTopic.toLowerCase()) {
+        await _publish(devWifiTopic, payload);
+      }
+      if (directTopic.toLowerCase() != rootWifiTopic.toLowerCase() &&
+          directTopic.toLowerCase() != devWifiTopic.toLowerCase()) {
+        await _publish(directTopic, payload);
+      }
+      if (lowerDev == 'sustainabyte_ir' || lowerDev == 'acacsustai') {
+        final itTopic = root.isNotEmpty
+            ? '$root/Sustainabyte_ITir/wifi'
+            : 'Sustainabyte_ITir/wifi';
+        await _publish(itTopic, payload);
+        await _publish('Sustainabyte_ITir/wifi', payload);
+      }
+    }
+  }
 
   /// Send a WiFi reset command to reopen the 60s Bluetooth provisioning window.
-  void sendWifiReset() {
-    final wifiTopic = AppConfig.getMqttWifiTopic(_deviceId);
-    _publish(wifiTopic, 'WIFI_RESET');
+  /// Spec Section 11: Topic <root>/wifi, Payload: WIFI_RESET
+  void sendWifiReset({String? targetDeviceId}) {
+    _publishWifiCommand('WIFI_RESET', targetDeviceId: targetDeviceId);
   }
 
   /// Request WiFi info via MQTT.
-  void requestWifiStatus() {
-    final wifiTopic = AppConfig.getMqttWifiTopic(_deviceId);
-    _publish(wifiTopic, 'STATUS');
+  /// Spec Section 11: Topic <root>/wifi, Payload: STATUS
+  void requestWifiStatus({String? targetDeviceId}) {
+    _publishWifiCommand('STATUS', targetDeviceId: targetDeviceId);
+  }
+
+  /// Set WiFi credentials via MQTT.
+  /// Spec Section 11: Topic <root>/wifi, Payload: SET:SSID,PASSWORD
+  void setWifiMqtt(String ssid, String password, {String? targetDeviceId}) {
+    _publishWifiCommand('SET:$ssid,$password', targetDeviceId: targetDeviceId);
+    _publishWifiCommand('PRIMARY:$ssid,$password', targetDeviceId: targetDeviceId);
   }
 
   /// Set primary WiFi credentials via MQTT.
-  void setPrimaryWifiMqtt(String ssid, String password) {
-    final wifiTopic = AppConfig.getMqttWifiTopic(_deviceId);
-    _publish(wifiTopic, 'PRIMARY:$ssid,$password');
+  /// Spec Section 11: Topic <root>/wifi, Payload: PRIMARY:SSID,PASSWORD
+  void setPrimaryWifiMqtt(String ssid, String password,
+      {String? targetDeviceId}) {
+    _publishWifiCommand('PRIMARY:$ssid,$password', targetDeviceId: targetDeviceId);
+    _publishWifiCommand('SET:$ssid,$password', targetDeviceId: targetDeviceId);
+  }
+
+  /// Erase WiFi credentials via MQTT.
+  /// Spec Section 11: Topic <root>/wifi, Payload: ERASE
+  void eraseWifiMqtt({String? targetDeviceId}) {
+    _publishWifiCommand('ERASE', targetDeviceId: targetDeviceId);
   }
 
   /// Send a WiFi connect command to switch to/connect to the configured WiFi.
-  void sendWifiConnect() {
-    final wifiTopic = AppConfig.getMqttWifiTopic(_deviceId);
-    _publish(wifiTopic, 'WIFI_CONNECT');
+  void sendWifiConnect({String? targetDeviceId}) {
+    _publishWifiCommand('WIFI_CONNECT', targetDeviceId: targetDeviceId);
   }
 
   /// Set secondary WiFi credentials via MQTT.
-  void setSecondaryWifiMqtt(String ssid, String password) {
-    final wifiTopic = AppConfig.getMqttWifiTopic(_deviceId);
-    _publish(wifiTopic, 'SECONDARY:$ssid,$password');
+  void setSecondaryWifiMqtt(String ssid, String password,
+      {String? targetDeviceId}) {
+    _publishWifiCommand('SECONDARY:$ssid,$password', targetDeviceId: targetDeviceId);
   }
 
-  // ── IR Learn & Clear Control (v5.1 Protocol) ──────────────────────────
+  // ── OTA Commands (Spec Section 12) ────────────────────────────────────
 
-  /// Send LEARN_ON to arm IR receiver for next POWER_ON signal.
-  void learnOn() {
-    sendControlCommand('LEARN_ON');
+  /// Check for OTA update via MQTT.
+  /// Spec Section 12: Topic <root>/ota, Payload: CHECK
+  void checkOta({String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    final otaTopic = AppConfig.getMqttOtaTopic(devId);
+    debugPrint('🔄 [MQTT] Checking OTA update (device: $devId)');
+    _publish(otaTopic, 'CHECK');
   }
 
-  /// Send LEARN_OFF to arm IR receiver for next POWER_OFF signal.
-  void learnOff() {
-    sendControlCommand('LEARN_OFF');
+  /// Trigger OTA firmware update via MQTT.
+  /// Spec Section 12: Topic <root>/ota, Payload: URL:http://<server>/<firmware>.bin
+  void updateOta(String url, {String? targetDeviceId}) {
+    final devId = targetDeviceId ?? _deviceId;
+    final otaTopic = AppConfig.getMqttOtaTopic(devId);
+    debugPrint('🔄 [MQTT] Triggering OTA update -> URL:$url (device: $devId)');
+    _publish(otaTopic, 'URL:$url');
   }
 
-  /// Send LEARN_UP (16-29°C) to arm IR receiver for that UP step.
-  void learnUp(int temp) {
+  // ── IR Learn Control (Spec Section 5) ─────────────────────────────────
+
+  /// Send IR_LEARN_ON to arm IR receiver for next AC ON signal.
+  /// Spec Section 5: Topic <root>/control, Payload: IR_LEARN_ON
+  void learnOn({String? targetDeviceId}) {
+    sendControlCommand('IR_LEARN_ON', targetDeviceId: targetDeviceId);
+  }
+
+  /// Send IR_LEARN_OFF to arm IR receiver for next AC OFF signal.
+  /// Spec Section 5: Topic <root>/control, Payload: IR_LEARN_OFF
+  void learnOff({String? targetDeviceId}) {
+    sendControlCommand('IR_LEARN_OFF', targetDeviceId: targetDeviceId);
+  }
+
+  /// Send IR_LEARN_TEMP_UP:<temperature> (Range: 16–29°C) to arm IR receiver for UP step.
+  /// Spec Section 3.6: Topic <root>/control, Payload: IR_LEARN_TEMP_UP:<16-29>
+  void learnTempUp(int temp, {String? targetDeviceId}) {
     if (temp < 16 || temp > 29) {
-      debugPrint('⚠️ [MQTT] LEARN_UP temperature out of range (16-29): $temp');
+      debugPrint(
+          '⚠️ [MQTT] IR_LEARN_TEMP_UP temperature out of range (16-29): $temp');
       return;
     }
-    sendControlCommand('LEARN_UP:$temp');
+    sendControlCommand('IR_LEARN_TEMP_UP:$temp',
+        targetDeviceId: targetDeviceId);
   }
 
-  /// Send LEARN_DOWN (17-30°C) to arm IR receiver for that DOWN step.
-  void learnDown(int temp) {
+  /// Send IR_LEARN_TEMP_DOWN:<temperature> (Range: 17–30°C) to arm IR receiver for DOWN step.
+  /// Spec Section 3.6: Topic <root>/control, Payload: IR_LEARN_TEMP_DOWN:<17-30>
+  void learnTempDown(int temp, {String? targetDeviceId}) {
     if (temp < 17 || temp > 30) {
-      debugPrint('⚠️ [MQTT] LEARN_DOWN temperature out of range (17-30): $temp');
+      debugPrint(
+          '⚠️ [MQTT] IR_LEARN_TEMP_DOWN temperature out of range (17-30): $temp');
       return;
     }
-    sendControlCommand('LEARN_DOWN:$temp');
+    sendControlCommand('IR_LEARN_TEMP_DOWN:$temp',
+        targetDeviceId: targetDeviceId);
   }
 
-  /// Send LEARN_STOP to cancel any in-progress capture.
-  void learnStop() {
-    sendControlCommand('LEARN_STOP');
+  /// Alias for learnTempUp
+  void learnUp(int temp, {String? targetDeviceId}) =>
+      learnTempUp(temp, targetDeviceId: targetDeviceId);
+
+  /// Alias for learnTempDown
+  void learnDown(int temp, {String? targetDeviceId}) =>
+      learnTempDown(temp, targetDeviceId: targetDeviceId);
+
+  /// Send IR_LEARN_STOP to cancel any in-progress IR capture.
+  /// Spec Section 5: Topic <root>/control, Payload: IR_LEARN_STOP
+  void learnStop({String? targetDeviceId}) {
+    sendControlCommand('IR_LEARN_STOP', targetDeviceId: targetDeviceId);
   }
 
-  /// Send LEARN_STATUS to report what's learned / missing.
-  void getLearnStatus() {
-    sendControlCommand('LEARN_STATUS');
+  /// Request LEARN status.
+  void getLearnStatus({String? targetDeviceId}) {
+    sendControlCommand('LEARN_STATUS', targetDeviceId: targetDeviceId);
   }
 
   /// Send CLEAR_ON to free RAM + delete /ir/on.bin.
-  void clearOn() {
-    sendControlCommand('CLEAR_ON');
+  void clearOn({String? targetDeviceId}) {
+    sendControlCommand('CLEAR_ON', targetDeviceId: targetDeviceId);
   }
 
   /// Send CLEAR_OFF to free RAM + delete /ir/off.bin.
-  void clearOff() {
-    sendControlCommand('CLEAR_OFF');
+  void clearOff({String? targetDeviceId}) {
+    sendControlCommand('CLEAR_OFF', targetDeviceId: targetDeviceId);
   }
 
   /// Send CLEAR_UP:<16-29> to delete that UP step file.
-  void clearUp(int temp) {
+  void clearUp(int temp, {String? targetDeviceId}) {
     if (temp < 16 || temp > 29) {
       debugPrint('⚠️ [MQTT] CLEAR_UP temperature out of range (16-29): $temp');
       return;
     }
-    sendControlCommand('CLEAR_UP:$temp');
+    sendControlCommand('CLEAR_UP:$temp', targetDeviceId: targetDeviceId);
   }
 
   /// Send CLEAR_DOWN:<17-30> to delete that DOWN step file.
-  void clearDown(int temp) {
+  void clearDown(int temp, {String? targetDeviceId}) {
     if (temp < 17 || temp > 30) {
-      debugPrint('⚠️ [MQTT] CLEAR_DOWN temperature out of range (17-30): $temp');
+      debugPrint(
+          '⚠️ [MQTT] CLEAR_DOWN temperature out of range (17-30): $temp');
       return;
     }
-    sendControlCommand('CLEAR_DOWN:$temp');
+    sendControlCommand('CLEAR_DOWN:$temp', targetDeviceId: targetDeviceId);
   }
 
-  /// Send CLEAR_ALL to delete ON/OFF, 14 UP and 14 DOWN files (30 deletes total).
-  void clearAll() {
-    sendControlCommand('CLEAR_ALL');
+  /// Send CLEAR_ALL to delete all learned IR files.
+  void clearAll({String? targetDeviceId}) {
+    sendControlCommand('CLEAR_ALL', targetDeviceId: targetDeviceId);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
   /// Validate HH:MM format (24hr, zero-padded).
-  bool _isValidTime(String time) {
+  static bool isValidTime(String time) {
     final regex = RegExp(r'^([01]\d|2[0-3]):[0-5]\d$');
     if (!regex.hasMatch(time)) {
       debugPrint('⚠️ [MQTT] Invalid time format: $time (expected HH:MM)');

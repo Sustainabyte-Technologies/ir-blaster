@@ -15,6 +15,8 @@ import 'package:ir_blaster_ac/core/config/app_config.dart';
 import 'package:ir_blaster_ac/core/services/local_cache_service.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
+import 'package:ir_blaster_ac/core/services/mqtt_service.dart';
+import 'package:ir_blaster_ac/screens/ac_app/schedule_calendar_page.dart';
 
 class DeviceDetailPage extends StatefulWidget {
   final String deviceName;
@@ -3320,201 +3322,14 @@ class _DeviceDetailPageState extends State<DeviceDetailPage>
   }
 
   void _showSchedulePicker(bool isDark) {
+    // Navigate to the new SIRIS 2.0 Schedule Calendar Page with day-wise support
+    final mqtt = MqttService();
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => ScheduleManagerPage(
-          isDark: isDark,
-          schedules: _dynamicSchedules,
-          lunch: {'on': _lunchOn, 'off': _lunchOff},
-          onSave: (updatedSchedules, updatedLunch, hasClearedAll) {
-            // Keep copy of original values before updating state to compare for changes
-            final originalSchedules = List<Map<String, String>>.from(
-                _dynamicSchedules.map((s) => Map<String, String>.from(s)));
-            final originalLunchOn = _lunchOn;
-            final originalLunchOff = _lunchOff;
-
-            setState(() {
-              _dynamicSchedules.clear();
-              _dynamicSchedules.addAll(updatedSchedules);
-              while (_dynamicSchedules.length < 6) {
-                _dynamicSchedules
-                    .add({'on': '--:--', 'off': '--:--', 'interval': 'None'});
-              }
-
-              // Map back to backward-compatible individual variables if needed
-              if (_dynamicSchedules.isNotEmpty) {
-                _scheduleOn1 = _dynamicSchedules[0]['on'] ?? '--:--';
-                _scheduleOff1 = _dynamicSchedules[0]['off'] ?? '--:--';
-              } else {
-                _scheduleOn1 = '--:--';
-                _scheduleOff1 = '--:--';
-              }
-              if (_dynamicSchedules.length > 1) {
-                _scheduleOn2 = _dynamicSchedules[1]['on'] ?? '--:--';
-                _scheduleOff2 = _dynamicSchedules[1]['off'] ?? '--:--';
-              } else {
-                _scheduleOn2 = '--:--';
-                _scheduleOff2 = '--:--';
-              }
-              if (_dynamicSchedules.length > 2) {
-                _scheduleOn3 = _dynamicSchedules[2]['on'] ?? '--:--';
-                _scheduleOff3 = _dynamicSchedules[2]['off'] ?? '--:--';
-              } else {
-                _scheduleOn3 = '--:--';
-                _scheduleOff3 = '--:--';
-              }
-              if (_dynamicSchedules.length > 3) {
-                _scheduleOn4 = _dynamicSchedules[3]['on'] ?? '--:--';
-                _scheduleOff4 = _dynamicSchedules[3]['off'] ?? '--:--';
-              } else {
-                _scheduleOn4 = '--:--';
-                _scheduleOff4 = '--:--';
-              }
-              if (_dynamicSchedules.length > 4) {
-                _scheduleOn5 = _dynamicSchedules[4]['on'] ?? '--:--';
-                _scheduleOff5 = _dynamicSchedules[4]['off'] ?? '--:--';
-              } else {
-                _scheduleOn5 = '--:--';
-                _scheduleOff5 = '--:--';
-              }
-              if (_dynamicSchedules.length > 5) {
-                _scheduleOn6 = _dynamicSchedules[5]['on'] ?? '--:--';
-                _scheduleOff6 = _dynamicSchedules[5]['off'] ?? '--:--';
-              } else {
-                _scheduleOn6 = '--:--';
-                _scheduleOff6 = '--:--';
-              }
-
-              _lunchOn = updatedLunch['on'] ?? '--:--';
-              _lunchOff = updatedLunch['off'] ?? '--:--';
-            });
-
-            // 1. Check if user clicked common delete all schedules
-            if (hasClearedAll) {
-              _publishMqttCommand('SCH_CLEAR',
-                  topic: _getDeviceTopic('schedule'), allowOffline: true);
-            } else {
-              // Helper to normalize --:-- and DISABLED to 'DISABLED' for clean comparison
-              String normalize(String? val) {
-                if (val == null ||
-                    val == '--:--' ||
-                    val.toUpperCase() == 'DISABLED') {
-                  return 'DISABLED';
-                }
-                return val.trim();
-              }
-
-              // 2. Publish daily schedules (only send commands if the values changed!)
-              final maxSchedules =
-                  math.max(originalSchedules.length, updatedSchedules.length);
-              for (int i = 0; i < maxSchedules; i++) {
-                final idx = i + 1;
-
-                final String origOn = i < originalSchedules.length
-                    ? normalize(originalSchedules[i]['on'])
-                    : 'DISABLED';
-                final String origOff = i < originalSchedules.length
-                    ? normalize(originalSchedules[i]['off'])
-                    : 'DISABLED';
-
-                final String newOn = i < updatedSchedules.length
-                    ? normalize(updatedSchedules[i]['on'])
-                    : 'DISABLED';
-                final String newOff = i < updatedSchedules.length
-                    ? normalize(updatedSchedules[i]['off'])
-                    : 'DISABLED';
-
-                if (newOn == 'DISABLED' && newOff == 'DISABLED') {
-                  // If it is now cleared/disabled but was previously active, send SCH_CLEAR$idx
-                  if (origOn != 'DISABLED' || origOff != 'DISABLED') {
-                    _publishMqttCommand('SCH_CLEAR$idx',
-                        topic: _getDeviceTopic('schedule'), allowOffline: true);
-                  }
-                } else {
-                  // If it is active, publish the specific changed times
-                  if (newOn != origOn) {
-                    _publishMqttCommand('SCH_ON$idx:$newOn',
-                        topic: _getDeviceTopic('schedule'), allowOffline: true);
-                  }
-                  if (newOff != origOff) {
-                    _publishMqttCommand('SCH_OFF$idx:$newOff',
-                        topic: _getDeviceTopic('schedule'), allowOffline: true);
-                  }
-
-                  // Publish interval if changed
-                  final String origInt = i < originalSchedules.length
-                      ? (originalSchedules[i]['interval'] ?? 'None')
-                      : 'None';
-                  final String newInt = i < updatedSchedules.length
-                      ? (updatedSchedules[i]['interval'] ?? 'None')
-                      : 'None';
-                  if (newInt != origInt) {
-                    _publishMqttCommand('SCH_INT$idx:$newInt',
-                        topic: _getDeviceTopic('schedule'), allowOffline: true);
-                  }
-                }
-              }
-
-              // 3. Publish lunch schedule (only send if changed!)
-              final String origLunchOn = normalize(originalLunchOn);
-              final String origLunchOff = normalize(originalLunchOff);
-
-              final String newLunchOn = normalize(updatedLunch['on']);
-              final String newLunchOff = normalize(updatedLunch['off']);
-
-              if (newLunchOn == 'DISABLED' && newLunchOff == 'DISABLED') {
-                // If it is now fully disabled and was previously active, send clear
-                if (origLunchOn != 'DISABLED' || origLunchOff != 'DISABLED') {
-                  _publishMqttCommand('SCH_CLEAR_LUNCH',
-                      topic: _getDeviceTopic('schedule'), allowOffline: true);
-                }
-              } else {
-                if (newLunchOn != origLunchOn) {
-                  _publishMqttCommand('LUNCH_ON:$newLunchOn',
-                      topic: _getDeviceTopic('schedule'), allowOffline: true);
-                }
-                if (newLunchOff != origLunchOff) {
-                  _publishMqttCommand('LUNCH_OFF:$newLunchOff',
-                      topic: _getDeviceTopic('schedule'), allowOffline: true);
-                }
-              }
-            }
-
-            // 4. Show success snackbar/tooltip
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(Icons.check_circle_rounded,
-                        color: Color(0xFF6CC042), size: 18),
-                    const SizedBox(width: 10),
-                    Text(
-                      'Schedule Set Successfully',
-                      style: GoogleFonts.poppins(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: const Color(0xFF131122),
-                behavior: SnackBarBehavior.floating,
-                margin: const EdgeInsets.all(16),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: BorderSide(
-                      color: const Color(0xFF6CC042).withOpacity(0.3),
-                      width: 1.2),
-                ),
-                elevation: 6,
-                duration: const Duration(seconds: 2),
-              ),
-            );
-          },
+        builder: (context) => ScheduleCalendarPage(
+          deviceName: _selectedEquipmentName,
+          initialState: mqtt.lastState,
         ),
       ),
     );

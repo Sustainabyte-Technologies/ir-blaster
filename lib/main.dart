@@ -15,8 +15,10 @@ import 'package:ir_blaster_ac/screens/ac_app/platform_admin_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/company_sites_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/company_admin_page.dart';
 
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
 
   // Initialize Firebase
   try {

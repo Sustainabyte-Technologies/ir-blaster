@@ -11,6 +11,8 @@ import 'package:ir_blaster_ac/screens/ac_app/equipment_list_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/system_list_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/ir_learning_config_page.dart';
 
+import 'package:ir_blaster_ac/screens/ac_app/ac_config_management_page.dart';
+
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
 
@@ -185,6 +187,52 @@ class _SettingsPageState extends State<SettingsPage> {
                               ),
                               Text(
                                 'Capture & Erase ON/OFF & Temp Signals (MQTT)',
+                                style: GoogleFonts.inter(
+                                  color: subtitleColor,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      Icon(Icons.chevron_right_rounded, size: 20, color: subtitleColor),
+                    ],
+                  ),
+                ),
+              ),
+              const Divider(height: 20),
+              // AC Brand & Command Configuration
+              InkWell(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AcConfigManagementPage()),
+                  );
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.developer_board_rounded, size: 18, color: subtitleColor),
+                          const SizedBox(width: 12),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'AC Brands & Commands Config',
+                                style: GoogleFonts.inter(
+                                  color: textColor,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              Text(
+                                'Manage Brands, Models, Commands & Address Mappings',
                                 style: GoogleFonts.inter(
                                   color: subtitleColor,
                                   fontSize: 11,

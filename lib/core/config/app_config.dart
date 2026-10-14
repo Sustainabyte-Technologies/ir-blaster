@@ -26,15 +26,21 @@ class AppConfig {
   }
 
   // ── MQTT (SIRIS IR Blaster) ──────────────────────────────────────────
-  // NOTE: Username & password are now fetched dynamically from the API
-  // via MqttConfigService.fetchMqttConfig(). The getters below are
-  // .env-only fallbacks used if the API call hasn't completed yet.
-  static String get mqttBroker => dotenv.env['MQTT_BROKER'] ?? '13.66.130.236';
+  // Fetched dynamically from MqttConfigService (API) with .env fallbacks.
+  // Never hardcode any broker, credentials, root, or device ID.
+  static String get mqttBroker {
+    final cachedHost = MqttConfigService.cached?.host;
+    if (cachedHost != null && cachedHost.isNotEmpty) return cachedHost;
+    return dotenv.env['MQTT_BROKER'] ?? '';
+  }
 
-  static int get mqttPort =>
-      int.tryParse(dotenv.env['MQTT_PORT'] ?? '1883') ?? 1883;
+  static int get mqttPort {
+    final cachedPort = MqttConfigService.cached?.port;
+    if (cachedPort != null && cachedPort > 0) return cachedPort;
+    return int.tryParse(dotenv.env['MQTT_PORT'] ?? '') ?? 1883;
+  }
 
-  /// Fallback MQTT username — prefer MqttConfigService.cached?.username
+  /// Dynamic MQTT username (prefer MqttConfigService.cached)
   static String get mqttUsername {
     final cached = MqttConfigService.cached?.username;
     if (cached != null && cached.isNotEmpty) return cached;
@@ -43,7 +49,7 @@ class AppConfig {
     return '';
   }
 
-  /// Fallback MQTT password — prefer MqttConfigService.cached?.password
+  /// Dynamic MQTT password (prefer MqttConfigService.cached)
   static String get mqttPassword {
     final cached = MqttConfigService.cached?.password;
     if (cached != null && cached.isNotEmpty) return cached;
@@ -52,15 +58,31 @@ class AppConfig {
     return '';
   }
 
-  /// Prefix used for subscription topics. The device publishes data on
-  /// `<mqttUsername>/data`. Subscribe to this before sending any command.
+  /// Dynamic MQTT ROOT topic (e.g. "iaq" or "customer/site/device")
+  static String get mqttRoot {
+    final cachedTopic = MqttConfigService.cached?.topic;
+    if (cachedTopic != null && cachedTopic.isNotEmpty) return cachedTopic;
+    final envRoot = dotenv.env['MQTT_ROOT'] ?? dotenv.env['MQTT_TOPIC'];
+    if (envRoot != null && envRoot.isNotEmpty) return envRoot;
+    final user = mqttUsername;
+    if (user.isNotEmpty) return user;
+    return '';
+  }
+
+  /// Alias for mqttRoot
+  static String get mqttTopic => mqttRoot;
+
+  /// Dynamic default data topic: <MQTT_ROOT>/data
   static String get mqttDataTopic =>
-      dotenv.env['MQTT_DATA_TOPIC'] ?? '$mqttUsername/data';
+      dotenv.env['MQTT_DATA_TOPIC'] ??
+      (mqttRoot.isNotEmpty ? '$mqttRoot/data' : 'data');
 
   static String _defaultMqttDeviceId = '';
-  /// The device_id used in MQTT topic paths & payload prefixes
+  /// The dynamic device_id used in MQTT payloads & device resolution
   static String get mqttDeviceId =>
-      dotenv.env['MQTT_DEVICE_ID'] ?? _defaultMqttDeviceId;
+      _defaultMqttDeviceId.isNotEmpty
+          ? _defaultMqttDeviceId
+          : (dotenv.env['MQTT_DEVICE_ID'] ?? '');
 
   static set mqttDeviceId(String value) {
     if (value.isNotEmpty) {
@@ -68,63 +90,121 @@ class AppConfig {
     }
   }
 
-  // ── Per-device topic builders (SIRIS Spec) ───────────────────────────
+  // ── Production Topic Structure (SIRIS Spec Section 15) ───────────────
   //
-  // Control : <mqttTopic>/<deviceId>/control
-  // Temp    : <mqttTopic>/<deviceId>/control/set_temp
-  // Schedule: <mqttTopic>/<deviceId>/schedule
+  // The application treats MQTT ROOT as configurable (e.g. "iaq" or "customer/site/device").
+  // Rules from Spec Section 15:
+  //   Control    : <MQTT_ROOT>/control
+  //   Set Temp   : <MQTT_ROOT>/control/set_temp
+  //   Status     : <MQTT_ROOT>/status
+  //   Schedule   : <MQTT_ROOT>/schedule
+  //   Online     : <MQTT_ROOT>/online
+  //   OTA        : <MQTT_ROOT>/ota
+  //   WiFi       : <MQTT_ROOT>/wifi
+  //   Data       : <MQTT_ROOT>/data
   //
-  // These accept a deviceId parameter so the app can work with
-  // multiple devices in the future.
+  // "Do NOT automatically append the Device ID to the MQTT ROOT."
 
-  /// AC ON/OFF/STATUS control topic.
-  static String getMqttControlTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/control';
-
-  /// Temperature set topic.
-  static String getMqttTempTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/control/set_temp';
-
-  /// Schedule control topic (set times, clear slots, STATUS).
-  static String getMqttScheduleTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/schedule';
-
-  /// WiFi control and status topic.
-  static String getMqttWifiTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/wifi';
-
-  /// IR learn and clear control topic (e.g. <mqttTopic>/<deviceId>/ir_learn).
-  static String getMqttIrLearnTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/ir_learn';
-
-  // ── Legacy getters (for backward compatibility) ──────────────────────
-  static String get mqttTopic {
-    final cachedTopic = MqttConfigService.cached?.topic;
-    if (cachedTopic != null && cachedTopic.isNotEmpty) {
-      return cachedTopic;
+  /// Helper to resolve root topic dynamically
+  static String resolveRoot([String? customRootOrDevice]) {
+    if (customRootOrDevice != null && customRootOrDevice.isNotEmpty) {
+      if (customRootOrDevice.contains('/')) {
+        return customRootOrDevice;
+      }
     }
-    final envTopic = dotenv.env['MQTT_TOPIC'];
-    if (envTopic != null && envTopic.isNotEmpty) {
-      return envTopic;
-    }
-    final user = mqttUsername;
-    if (user.isNotEmpty) {
-      return user;
-    }
-    return 'testir';
+    return mqttRoot;
   }
 
-  static String get mqttControlTopic =>
-      dotenv.env['MQTT_CONTROL_TOPIC'] ?? '$mqttTopic/$mqttDeviceId/control';
+  /// AC ON/OFF/STATUS control topic: <MQTT_ROOT>/<deviceId>/control
+  static String getMqttControlTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/control' : '$deviceId/control';
+    }
+    return root.isNotEmpty ? '$root/control' : 'control';
+  }
 
-  static String get mqttScheduleTopic =>
-      dotenv.env['MQTT_SCHEDULE_TOPIC'] ?? '$mqttTopic/$mqttDeviceId/schedule';
+  /// Dedicated temperature set topic: <MQTT_ROOT>/<deviceId>/control/set_temp
+  static String getMqttTempTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/control/set_temp' : '$deviceId/control/set_temp';
+    }
+    return root.isNotEmpty ? '$root/control/set_temp' : 'control/set_temp';
+  }
 
-  static String get mqttStatusTopic =>
-      dotenv.env['MQTT_STATUS_TOPIC'] ?? '$mqttTopic/$mqttDeviceId/status';
+  /// Schedule control topic (Plaintext Mode): <MQTT_ROOT>/<deviceId>/schedule
+  static String getMqttScheduleTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/schedule' : '$deviceId/schedule';
+    }
+    return root.isNotEmpty ? '$root/schedule' : 'schedule';
+  }
 
-  static String getMqttStatusTopic(String deviceId) =>
-      '$mqttTopic/$deviceId/status';
+  /// Schedule control topic (SIRIS 2.0 JSON Mode): <MQTT_ROOT>/<deviceId>/schedule
+  static String getMqttJsonScheduleTopic(String deviceId) {
+    final root = mqttRoot;
+    if (root.isNotEmpty && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return '$root/$deviceId/schedule';
+    }
+    return deviceId.isNotEmpty ? '$deviceId/schedule' : getMqttScheduleTopic(deviceId);
+  }
+
+  /// WiFi control and status topic: <MQTT_ROOT>/<deviceId>/wifi
+  static String getMqttWifiTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/wifi' : '$deviceId/wifi';
+    }
+    return root.isNotEmpty ? '$root/wifi' : 'wifi';
+  }
+
+  /// OTA check & update topic: <MQTT_ROOT>/<deviceId>/ota
+  static String getMqttOtaTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/ota' : '$deviceId/ota';
+    }
+    return root.isNotEmpty ? '$root/ota' : 'ota';
+  }
+
+  /// Status topic: <MQTT_ROOT>/<deviceId>/status
+  static String getMqttStatusTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/status' : '$deviceId/status';
+    }
+    return root.isNotEmpty ? '$root/status' : 'status';
+  }
+
+  /// Data telemetry topic: <MQTT_ROOT>/<deviceId>/data
+  static String getMqttDataTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/data' : '$deviceId/data';
+    }
+    return root.isNotEmpty ? '$root/data' : 'data';
+  }
+
+  /// Online status topic: <MQTT_ROOT>/<deviceId>/online
+  static String getMqttOnlineTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty ? '$root/$deviceId/online' : '$deviceId/online';
+    }
+    return root.isNotEmpty ? '$root/online' : 'online';
+  }
+
+  /// IR learn control topic: <MQTT_ROOT>/<deviceId>/control
+  static String getMqttIrLearnTopic([String? deviceId]) {
+    return getMqttControlTopic(deviceId);
+  }
+
+  // Legacy getters
+  static String get mqttControlTopic => getMqttControlTopic();
+  static String get mqttScheduleTopic => getMqttScheduleTopic();
+  static String get mqttStatusTopic => getMqttStatusTopic();
 
   /// Prefix used in MQTT payloads, e.g. ":STATUS_OFFLINE"
   static String get mqttPayloadPrefix =>
