@@ -177,6 +177,66 @@ class LocalCacheService {
     }
   }
 
+  /// Save configured schedule slot time & days for a device
+  static Future<void> saveScheduleSlotConfig(
+      String deviceId, int slot, {String? onTime, String? offTime, String? days, bool? isEnabled}) async {
+    if (deviceId.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final normKey = 'sched_cfg_${deviceId.trim().toLowerCase()}_$slot';
+      final rawKey = 'sched_cfg_${deviceId}_$slot';
+      final existingStr = prefs.getString(normKey) ?? prefs.getString(rawKey);
+      Map<String, dynamic> data = {};
+      if (existingStr != null) {
+        try {
+          data = jsonDecode(existingStr) as Map<String, dynamic>;
+        } catch (_) {}
+      }
+      if (isEnabled != null) {
+        data['isEnabled'] = isEnabled;
+      }
+      if (onTime != null && onTime != 'DISABLED' && onTime.isNotEmpty && onTime != '--:--') {
+        data['onTime'] = onTime;
+      }
+      if (offTime != null && offTime != 'DISABLED' && offTime.isNotEmpty && offTime != '--:--') {
+        data['offTime'] = offTime;
+      }
+      if (days != null && days != 'DISABLED' && days.isNotEmpty) {
+        data['days'] = days;
+      }
+      await prefs.setString(normKey, jsonEncode(data));
+    } catch (e) {
+      debugPrint('⚠️ [Cache] Error saving schedule slot $slot for $deviceId: $e');
+    }
+  }
+
+  /// Retrieve configured schedule slot time & days for a device
+  static Future<Map<String, dynamic>?> getScheduleSlotConfig(String deviceId, int slot) async {
+    if (deviceId.isEmpty) return null;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final normKey = 'sched_cfg_${deviceId.trim().toLowerCase()}_$slot';
+      final rawKey = 'sched_cfg_${deviceId}_$slot';
+      final existingStr = prefs.getString(normKey) ?? prefs.getString(rawKey);
+      if (existingStr != null) {
+        final data = jsonDecode(existingStr) as Map<String, dynamic>;
+        final String? onT = data['onTime']?.toString();
+        final String? offT = data['offTime']?.toString();
+        final String? d = data['days']?.toString();
+        final bool? en = data['isEnabled'] is bool ? data['isEnabled'] as bool : (data['isEnabled']?.toString() == 'true');
+        return {
+          if (en != null) 'isEnabled': en,
+          if (onT != null && onT != 'DISABLED' && onT.isNotEmpty && onT != '--:--') 'onTime': onT,
+          if (offT != null && offT != 'DISABLED' && offT.isNotEmpty && offT != '--:--') 'offTime': offT,
+          if (d != null && d != 'DISABLED' && d.isNotEmpty) 'days': d,
+        };
+      }
+    } catch (e) {
+      debugPrint('⚠️ [Cache] Error reading schedule slot $slot for $deviceId: $e');
+    }
+    return null;
+  }
+
   /// Clear all cached data (used during logout)
   static Future<void> clearAll() async {
     try {
@@ -188,3 +248,4 @@ class LocalCacheService {
     }
   }
 }
+

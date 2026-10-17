@@ -1,9 +1,36 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:ir_blaster_ac/core/constants/colors.dart';
+import 'package:ir_blaster_ac/core/services/mqtt_service.dart';
+import 'package:ir_blaster_ac/screens/ac_app/schedule_calendar_page.dart';
 
-class ScheduleOverviewPage extends StatelessWidget {
+class ScheduleOverviewPage extends StatefulWidget {
   const ScheduleOverviewPage({Key? key}) : super(key: key);
+
+  @override
+  State<ScheduleOverviewPage> createState() => _ScheduleOverviewPageState();
+}
+
+class _ScheduleOverviewPageState extends State<ScheduleOverviewPage> {
+  final MqttService _mqtt = MqttService();
+  StreamSubscription<SirisDeviceState>? _stateSub;
+  SirisDeviceState? _state;
+
+  @override
+  void initState() {
+    super.initState();
+    _state = _mqtt.lastState;
+    _stateSub = _mqtt.stateStream.listen((state) {
+      if (mounted) setState(() => _state = state);
+    });
+  }
+
+  @override
+  void dispose() {
+    _stateSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -27,46 +54,70 @@ class ScheduleOverviewPage extends StatelessWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         iconTheme: IconThemeData(color: textColor),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.edit_calendar_rounded, color: textColor, size: 22),
+            tooltip: 'Manage Schedules',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScheduleCalendarPage(
+                    deviceName: _state?.deviceId ?? 'Device',
+                    initialState: _state,
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
       ),
-      body: const ScheduleOverviewContent(),
+      body: ScheduleOverviewContent(state: _state),
     );
   }
 }
 
 class ScheduleOverviewContent extends StatelessWidget {
-  const ScheduleOverviewContent({Key? key}) : super(key: key);
+  final SirisDeviceState? state;
+
+  const ScheduleOverviewContent({Key? key, this.state}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final textColor = isDark ? AppColors.textPrimaryDark : AppColors.textPrimary;
 
-    final schedules = [
-      _ScheduleItem(
-        time: '09:30 AM',
-        title: 'Schedule ON',
-        subtitle: 'AC will turn ON',
-        color: AppColors.coolBlue,
-      ),
-      _ScheduleItem(
-        time: '01:00 PM',
-        title: 'Lunch OFF',
-        subtitle: 'AC will turn OFF',
-        color: AppColors.heatOrange,
-      ),
-      _ScheduleItem(
-        time: '02:00 PM',
-        title: 'Lunch ON',
-        subtitle: 'AC will turn ON',
-        color: AppColors.primary,
-      ),
-      _ScheduleItem(
-        time: '07:00 PM',
-        title: 'Schedule OFF',
-        subtitle: 'AC will turn OFF',
-        color: AppColors.offline,
-      ),
-    ];
+    // Build schedule items from live state
+    final schedules = _buildScheduleItems(state);
+
+    if (schedules.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.calendar_today_rounded,
+                color: textColor.withOpacity(0.15), size: 56),
+            const SizedBox(height: 16),
+            Text(
+              'No active schedules',
+              style: GoogleFonts.outfit(
+                color: textColor.withOpacity(0.4),
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Tap the calendar icon to set up schedules',
+              style: GoogleFonts.inter(
+                color: textColor.withOpacity(0.25),
+                fontSize: 13,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return Padding(
       padding: const EdgeInsets.all(24.0),
@@ -84,7 +135,7 @@ class ScheduleOverviewContent extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Schedule Overview (All Systems)',
+              'Active Schedule Timeline',
               style: GoogleFonts.outfit(
                 color: textColor,
                 fontSize: 16,
@@ -104,6 +155,138 @@ class ScheduleOverviewContent extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  List<_ScheduleItem> _buildScheduleItems(SirisDeviceState? s) {
+    if (s == null) return [];
+    final items = <_ScheduleItem>[];
+
+    // Helper to check if a slot is active
+    bool isActive(String on, String off) =>
+        on != 'DISABLED' && off != 'DISABLED' && on != '--:--' && off != '--:--';
+
+    String formatDays(String days) {
+      if (days.toUpperCase() == 'ALL' || days.toUpperCase() == 'DAILY' || days.toUpperCase() == 'EVERYDAY') {
+        return 'Every day';
+      }
+      return days;
+    }
+
+    // Slot 1
+    if (isActive(s.schOn1, s.schOff1)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOn1),
+        title: 'Schedule 1 — ON',
+        subtitle: 'AC turns ON · ${formatDays(s.schDays1)}',
+        color: AppColors.coolBlue,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOff1),
+        title: 'Schedule 1 — OFF',
+        subtitle: 'AC turns OFF · ${formatDays(s.schDays1)}',
+        color: AppColors.offline,
+      ));
+    }
+
+    // Slot 2
+    if (isActive(s.schOn2, s.schOff2)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOn2),
+        title: 'Schedule 2 — ON',
+        subtitle: 'AC turns ON · ${formatDays(s.schDays2)}',
+        color: AppColors.coolBlue,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOff2),
+        title: 'Schedule 2 — OFF',
+        subtitle: 'AC turns OFF · ${formatDays(s.schDays2)}',
+        color: AppColors.offline,
+      ));
+    }
+
+    // Slot 3
+    if (isActive(s.schOn3, s.schOff3)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOn3),
+        title: 'Schedule 3 — ON',
+        subtitle: 'AC turns ON · ${formatDays(s.schDays3)}',
+        color: AppColors.coolBlue,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOff3),
+        title: 'Schedule 3 — OFF',
+        subtitle: 'AC turns OFF · ${formatDays(s.schDays3)}',
+        color: AppColors.offline,
+      ));
+    }
+
+    // Slot 4
+    if (isActive(s.schOn4, s.schOff4)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOn4),
+        title: 'Schedule 4 — ON',
+        subtitle: 'AC turns ON · ${formatDays(s.schDays4)}',
+        color: AppColors.coolBlue,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOff4),
+        title: 'Schedule 4 — OFF',
+        subtitle: 'AC turns OFF · ${formatDays(s.schDays4)}',
+        color: AppColors.offline,
+      ));
+    }
+
+    // Slot 5
+    if (isActive(s.schOn5, s.schOff5)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOn5),
+        title: 'Schedule 5 — ON',
+        subtitle: 'AC turns ON · ${formatDays(s.schDays5)}',
+        color: AppColors.coolBlue,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.schOff5),
+        title: 'Schedule 5 — OFF',
+        subtitle: 'AC turns OFF · ${formatDays(s.schDays5)}',
+        color: AppColors.offline,
+      ));
+    }
+
+    // Lunch Break
+    if (isActive(s.lunchOn, s.lunchOff)) {
+      items.add(_ScheduleItem(
+        time: _format12h(s.lunchOn),
+        title: 'Lunch Break — OFF',
+        subtitle: 'AC turns OFF for break · ${formatDays(s.lunchDays)}',
+        color: AppColors.heatOrange,
+      ));
+      items.add(_ScheduleItem(
+        time: _format12h(s.lunchOff),
+        title: 'Lunch Break — ON',
+        subtitle: 'AC resumes after break · ${formatDays(s.lunchDays)}',
+        color: AppColors.primary,
+      ));
+    }
+
+    // Sort by time
+    items.sort((a, b) => a.time.compareTo(b.time));
+
+    return items;
+  }
+
+  String _format12h(String time) {
+    if (time == 'DISABLED' || time == '--:--' || !time.contains(':')) return '--:--';
+    try {
+      final parts = time.split(':');
+      int hour = int.parse(parts[0]);
+      int minute = int.parse(parts[1]);
+      final period = hour >= 12 ? 'PM' : 'AM';
+      int displayHour = hour % 12;
+      if (displayHour == 0) displayHour = 12;
+      return '${displayHour.toString().padLeft(2, ' ')}:${minute.toString().padLeft(2, '0')} $period';
+    } catch (e) {
+      return time;
+    }
   }
 
   Widget _buildScheduleRow(BuildContext context, _ScheduleItem item, {required bool isLast, required Color textColor}) {

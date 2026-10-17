@@ -1,3 +1,4 @@
+// ignore_for_file: unused_element, unused_field
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -8,9 +9,7 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'bluetooth_scanner_page.dart';
-import 'main_navigation_page.dart';
-import 'widgets/ac_control_widget.dart';
-import 'widgets/temperature_widget.dart';
+import 'ac_app/ac_control_page.dart';
 import 'widgets/wifi_section_widget.dart';
 import '../core/services/local_cache_service.dart';
 import '../core/config/app_config.dart';
@@ -33,6 +32,7 @@ class ConfigurationPage extends StatefulWidget {
 class _ConfigurationPageState extends State<ConfigurationPage> {
   late BluetoothConnection _connection;
   late BluetoothDevice _device;
+  String? _actualDeviceMac;
 
   // ====== Theme ======
   static const Color _themeGreen = Color.fromARGB(255, 123, 159, 71);
@@ -101,9 +101,11 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   bool _isGreenLedOn = false;
   bool _isYellowLedOn = false;
   bool _isBluetoothOn = false;
+  bool _hasNavigatedAway = false;
   String _lastDisconnectReason = "N/A";
   String _lastDisconnectTime = "N/A";
   Timer? _bluetoothStateTimer;
+  StreamSubscription<Uint8List>? _btStreamSub;
 
   // ====== WiFi Info ======
   String _wifiIP = "";
@@ -188,36 +190,40 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     _isConnected = _connection.isConnected;
     _isYellowLedOn = _isConnected;
 
-    _loadSavedState().then((_) {
-      _loadMqttConfig();
-    });
     _listenBluetooth();
     _startBluetoothStateMonitor();
+    _initConfiguration();
+  }
 
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted && _connection.isConnected) {
-        _sendCommand("GET_TEMP");
-        _sendCommand("GET_TIME");
-        _sendCommand("GET_WIFI"); // Ask device for actual WiFi status
+  Future<void> _initConfiguration() async {
+    await _loadSavedState();
+    await _loadMqttConfig();
 
-        // Directly show wifi configure page if bluetooth is connected
-        _showWifiSetupDialog();
+    if (mounted && _connection.isConnected) {
+      _sendCommand("GET_TEMP");
+      _sendCommand("GET_TIME");
+      _sendCommand("GET_WIFI"); // Ask device for actual WiFi status
 
-        // Timeout for initial sync
-        Future.delayed(const Duration(seconds: 5), () {
-          if (mounted && _wifiStatus.contains("Syncing")) {
-            setState(() {
-              _wifiStatus = "WiFi not connected"; // Fallback if no response
-            });
-          }
-        });
-      }
-    });
+      // Directly show unified WiFi & MQTT configure dialog if bluetooth is connected
+      _showWifiSetupDialog();
+
+      // Timeout for initial sync
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted && _wifiStatus.contains("Syncing")) {
+          setState(() {
+            _wifiStatus = "WiFi not connected"; // Fallback if no response
+          });
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
+    _hasNavigatedAway = true;
     _bluetoothStateTimer?.cancel();
+    _btStreamSub?.cancel();
+    _btStreamSub = null;
     _ssidController.dispose();
     _wifiPasswordController.dispose();
 
@@ -243,6 +249,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   Future<void> _loadSavedState() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      if (!mounted || _hasNavigatedAway) return;
 
       setState(() {
         final wasConnected = prefs.getBool('wifi_connected') ?? false;
@@ -268,7 +275,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
       if (aon != null) _autoOnController.text = aon.toString();
       if (aoff != null) _autoOffController.text = aoff.toString();
 
-      // MQTT saved
+      // MQTT saved preferences
       final h = prefs.getString('mqtt_host');
       final p = prefs.getInt('mqtt_port');
       final u = prefs.getString('mqtt_user');
@@ -277,8 +284,8 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
       if (h != null && h.isNotEmpty) _mqttHostController.text = h;
       if (p != null && p > 0) _mqttPortController.text = p.toString();
-      if (u != null) _mqttUserController.text = u;
-      if (pw != null) _mqttPassController.text = pw;
+      if (u != null && u.isNotEmpty) _mqttUserController.text = u;
+      if (pw != null && pw.isNotEmpty) _mqttPassController.text = pw;
       if (t != null && t.isNotEmpty) _mqttTopicController.text = t;
 
       // Load WiFi credentials
@@ -294,24 +301,46 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     try {
       final config = await MqttConfigService.fetchMqttConfig(type: 'AC');
       if (config != null && mounted) {
-        final prefs = await SharedPreferences.getInstance();
         setState(() {
-          if (prefs.getString('mqtt_host') == null) {
-            _mqttHostController.text = AppConfig.mqttBroker;
-          }
-          if (prefs.getInt('mqtt_port') == null) {
-            _mqttPortController.text = AppConfig.mqttPort.toString();
-          }
-          if (prefs.getString('mqtt_user') == null) {
-            _mqttUserController.text = config.username;
-          }
-          if (prefs.getString('mqtt_pass') == null) {
-            _mqttPassController.text = config.password;
-          }
-          if (prefs.getString('mqtt_topic') == null) {
+          if (config.topic.isNotEmpty) {
             _mqttTopicController.text = config.topic;
           }
+          if (config.port != null && config.port! > 0) {
+            _mqttPortController.text = config.port.toString();
+          } else if (_mqttPortController.text.isEmpty) {
+            _mqttPortController.text = AppConfig.mqttPort.toString();
+          }
+          if (config.host != null && config.host!.isNotEmpty) {
+            _mqttHostController.text = config.host!;
+          } else if (_mqttHostController.text.isEmpty) {
+            _mqttHostController.text = AppConfig.mqttBroker;
+          }
+          if (config.username.isNotEmpty) {
+            _mqttUserController.text = config.username;
+          }
+          if (config.password.isNotEmpty) {
+            _mqttPassController.text = config.password;
+          }
         });
+        debugPrint(
+            '✅ [ConfigPage] Dynamic MQTT Config loaded: topic=${config.topic}, port=${_mqttPortController.text}, ip=${_mqttHostController.text}, user=${config.username}');
+      } else if (mounted) {
+        // Fallback to dynamic AppConfig getters
+        if (_mqttTopicController.text.isEmpty) {
+          _mqttTopicController.text = AppConfig.mqttTopic;
+        }
+        if (_mqttPortController.text.isEmpty) {
+          _mqttPortController.text = AppConfig.mqttPort.toString();
+        }
+        if (_mqttHostController.text.isEmpty) {
+          _mqttHostController.text = AppConfig.mqttBroker;
+        }
+        if (_mqttUserController.text.isEmpty) {
+          _mqttUserController.text = AppConfig.mqttUsername;
+        }
+        if (_mqttPassController.text.isEmpty) {
+          _mqttPassController.text = AppConfig.mqttPassword;
+        }
       }
     } catch (e) {
       debugPrint('❌ Error loading MQTT config: $e');
@@ -363,22 +392,48 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     } catch (_) {}
   }
 
+  /// On ESP32 hardware, Base Wi-Fi Station MAC = Bluetooth Classic MAC - 2.
+  String _getWifiMac(String btMac) {
+    if (_actualDeviceMac != null && _actualDeviceMac!.isNotEmpty) {
+      return _actualDeviceMac!;
+    }
+    final clean = btMac.replaceAll(':', '').replaceAll('-', '').trim();
+    if (clean.length != 12) return btMac;
+    try {
+      final lastByte = int.parse(clean.substring(10, 12), radix: 16);
+      final wifiLastByte = (lastByte - 2) & 0xFF;
+      final hex = wifiLastByte.toRadixString(16).padLeft(2, '0').toUpperCase();
+      final baseHex = clean.substring(0, 10).toUpperCase() + hex;
+      final parts = <String>[];
+      for (int i = 0; i < 12; i += 2) {
+        parts.add(baseHex.substring(i, i + 2));
+      }
+      return parts.join(':');
+    } catch (_) {
+      return btMac;
+    }
+  }
+
   Future<void> _saveLocalDeviceToCache(String ip) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final listJson = prefs.getString('local_provisioned_devices') ?? '[]';
       final List<dynamic> list = jsonDecode(listJson);
 
-      final mac = _device.address.replaceAll(':', '').toUpperCase();
+      final wifiMac = _getWifiMac(_device.address);
+      final mac = wifiMac.replaceAll(':', '').toUpperCase();
       final shortId = mac.length >= 8 ? mac.substring(mac.length - 8) : mac;
 
-      final existingIndex =
-          list.indexWhere((element) => element['mac'] == _device.address);
+      final existingIndex = list.indexWhere((element) =>
+          element['mac'] == wifiMac ||
+          element['mac'] == _device.address ||
+          element['id'] == mac);
 
       final deviceMap = {
         'id': mac,
         'name': _device.name ?? 'Smart AC Controller',
-        'mac': _device.address,
+        'mac': wifiMac,
+        'btMac': _device.address,
         'shortId': shortId,
         'systemId': 'local_system',
         'ip': ip,
@@ -398,68 +453,18 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
       }
 
       await prefs.setString('local_provisioned_devices', jsonEncode(list));
-      debugPrint('💾 Saved configured Bluetooth device locally: $deviceMap');
+      debugPrint('💾 Saved configured device locally (Wi-Fi MAC: $wifiMac, BT MAC: ${_device.address}, shortId: $shortId): $deviceMap');
     } catch (e) {
       debugPrint('⚠️ Error saving local device cache: $e');
     }
   }
 
   void _showWifiConnectedDialog(String ip) {
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        final isDark = Theme.of(context).brightness == Brightness.dark;
-        return AlertDialog(
-          backgroundColor: isDark ? const Color(0xFF2D2D44) : Colors.white,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Row(
-            children: const [
-              Icon(Icons.wifi_rounded, color: Colors.green, size: 28),
-              SizedBox(width: 10),
-              Text(
-                "WiFi Connected",
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          content: Text(
-            "Device connected to WiFi successfully!\nIP Address: $ip\n\nGo to systems page or stay on configuration?",
-            style: const TextStyle(fontSize: 14),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                // Stay on config page — do nothing
-              },
-              child: const Text(
-                "Cancel",
-                style: TextStyle(
-                    color: Colors.white70,
-                    fontWeight: FontWeight.w500,
-                    fontSize: 15),
-              ),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _routeToSystemPage();
-              },
-              child: const Text(
-                "OK",
-                style: TextStyle(
-                    color: Colors.green,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16),
-              ),
-            ),
-          ],
-        );
-      },
-    );
+    if (!mounted || _hasNavigatedAway) return;
+    _hideWifiLoadingDialog();
+    _saveWifiStatus(true, ip: ip);
+    _saveLocalDeviceToCache(ip);
+    _routeToSystemPage();
   }
 
   void _startBluetoothStateMonitor() {
@@ -483,19 +488,46 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   }
 
   void _recordDisconnect(String reason) {
+    if (_hasNavigatedAway || !mounted) return;
+
     if (_connection.isConnected) {
       _log("BT event: $reason (still connected, ignoring disconnect)");
       return;
     }
 
     final time = DateFormat("yyyy-MM-dd HH:mm:ss").format(DateTime.now());
-    setState(() {
-      _isConnected = false;
-      _isYellowLedOn = false;
-      _lastDisconnectReason = reason;
-      _lastDisconnectTime = time;
-    });
+    if (mounted) {
+      setState(() {
+        _isConnected = false;
+        _isYellowLedOn = false;
+        _lastDisconnectReason = reason;
+        _lastDisconnectTime = time;
+      });
+    }
     _log("BT disconnected: $reason @ $time");
+
+    // If device disconnected Bluetooth while connecting WiFi or when WiFi credentials were sent (standard ESP32 radio switch)
+    if (_isConnectingWifi || _isWifiConnected) {
+      _hideWifiLoadingDialog();
+      if (mounted) {
+        setState(() {
+          _isConnectingWifi = false;
+          _isWifiConnected = true;
+          _wifiStatus = "WiFi credentials applied. Device active on WiFi ✅";
+          _isGreenLedOn = true;
+          _showMqttDropdown = true;
+        });
+      }
+      _saveWifiStatus(true, ip: _wifiIP);
+      _saveLocalDeviceToCache(_wifiIP);
+      _routeToSystemPage();
+      return;
+    }
+
+    // Only show reconnect dialog if user is idle and NOT in WiFi configuration
+    if (!_isWifiConnected && !_hasNavigatedAway && mounted) {
+      _showReconnectDialog();
+    }
   }
 
   String _disconnectHint(String reason) {
@@ -518,20 +550,29 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
   // ===================== BT Rx =====================
   void _listenBluetooth() {
-    _connection.input?.listen((Uint8List data) {
+    _btStreamSub?.cancel();
+    _btStreamSub = _connection.input?.listen((Uint8List data) {
+      if (!mounted || _hasNavigatedAway) return;
       final chunk = String.fromCharCodes(data);
       _log("RX: $chunk");
       _incomingBuffer += chunk;
 
       String line;
       while ((line = _extractLine()) != "") {
+        if (!mounted || _hasNavigatedAway) return;
         _handleLine(line.trim());
       }
     }, onError: (error) {
-      if (!mounted) return;
+      if (!mounted || _hasNavigatedAway) return;
       _recordDisconnect("Error: $error");
-    }).onDone(() {
-      if (!mounted) return;
+    });
+
+    _btStreamSub?.onDone(() {
+      if (!mounted || _hasNavigatedAway) return;
+      if (_incomingBuffer.trim().isNotEmpty) {
+        _handleLine(_incomingBuffer.trim());
+        _incomingBuffer = "";
+      }
       _recordDisconnect("Disconnected by remote");
     });
   }
@@ -563,11 +604,31 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   }
 
   void _handleLine(String line) {
-    if (line.isEmpty) return;
+    if (!mounted || line.isEmpty) return;
+
+    // Device MAC response (if reported directly by ESP32 firmware)
+    if (line.startsWith("MAC:") ||
+        line.startsWith("WIFI_MAC:") ||
+        line.startsWith("DEVICE_MAC:")) {
+      final reported = line.split(":").sublist(1).join(":").trim();
+      if (reported.isNotEmpty) {
+        _actualDeviceMac = reported;
+        debugPrint("📌 Received actual Wi-Fi MAC from ESP32: $_actualDeviceMac");
+      }
+      return;
+    }
 
     // WiFi
     if (line.startsWith("WIFI_CONNECTED:")) {
-      final ip = line.replaceFirst("WIFI_CONNECTED:", "").trim();
+      final payload = line.replaceFirst("WIFI_CONNECTED:", "").trim();
+      String ip = payload;
+      if (payload.contains(",")) {
+        final parts = payload.split(",");
+        ip = parts[0].trim();
+        if (parts.length > 1 && parts[1].contains(":")) {
+          _actualDeviceMac = parts[1].trim();
+        }
+      }
       setState(() {
         _isWifiConnected = true;
         _isConnectingWifi = false;
@@ -763,21 +824,26 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
   // ===================== Commands =====================
   Future<void> _sendCommand(String cmd) async {
+    if (!mounted || _hasNavigatedAway) return;
     if (!_connection.isConnected) {
-      _showSnack("Bluetooth not connected", _red);
+      if (mounted && !_hasNavigatedAway) {
+        _showSnack("Bluetooth not connected", _red);
+      }
       return;
     }
     try {
       _log("TX: $cmd");
       _connection.output.add(Uint8List.fromList(
-          utf8.encode("$cmd\r\n"))); // Using \r\n for better compatibility
+          utf8.encode("$cmd\n"))); // Using standard \n to avoid corrupting passwords with \r
       await _connection.output.allSent;
     } catch (e) {
-      _showSnack("Send failed: $e", _red);
+      if (mounted && !_hasNavigatedAway) {
+        _showSnack("Send failed: $e", _red);
+      }
     }
   }
 
-  // ===================== WiFi =====================
+  // ===================== WiFi & MQTT Setup Dialog =====================
   void _showWifiSetupDialog() {
     // Check if Bluetooth is connected
     if (!_isConnected) {
@@ -785,88 +851,289 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
       return;
     }
 
-    bool passwordVisible = false;
+    bool wifiPasswordVisible = false;
+    bool mqttPasswordVisible = false;
 
     showDialog(
       context: context,
       builder: (_) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: _cardBackground,
-          title:
-              const Text("WiFi Setup", style: TextStyle(color: Colors.white)),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ── Primary WiFi ──
-                const Text(
-                  "Primary WiFi",
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: const [
+              Icon(Icons.settings_suggest_rounded, color: _themeGreen, size: 26),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  "Device Configuration",
                   style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.5,
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
                   ),
                 ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _ssidController,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: const InputDecoration(
-                    labelText: "SSID",
-                    labelStyle: TextStyle(color: Colors.white70),
-                    border: OutlineInputBorder(),
-                    enabledBorder: OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white54)),
-                    focusedBorder: OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white)),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _wifiPasswordController,
-                  obscureText: !passwordVisible,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    labelText: "Password",
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    border: const OutlineInputBorder(),
-                    enabledBorder: const OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white54)),
-                    focusedBorder: const OutlineInputBorder(
-                        borderSide: BorderSide(color: Colors.white)),
-                    suffixIcon: IconButton(
-                      icon: Icon(
-                        passwordVisible
-                            ? Icons.visibility
-                            : Icons.visibility_off,
-                        color: Colors.white70,
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ── Section 1: WiFi Network ──
+                  Row(
+                    children: const [
+                      Icon(Icons.wifi, color: _themeGreen, size: 18),
+                      SizedBox(width: 8),
+                      Text(
+                        "WiFi Network",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                      onPressed: () {
-                        setDialogState(() {
-                          passwordVisible = !passwordVisible;
-                        });
-                      },
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _ssidController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      labelText: "WiFi SSID",
+                      hintText: "Enter WiFi Network Name",
+                      hintStyle: TextStyle(color: Colors.white30),
+                      labelStyle: TextStyle(color: Colors.white70),
+                      prefixIcon: Icon(Icons.wifi_outlined, color: Colors.white54, size: 20),
+                      border: OutlineInputBorder(),
+                      enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white38)),
+                      focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: _themeGreen)),
+                      isDense: true,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _wifiPasswordController,
+                    obscureText: !wifiPasswordVisible,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: "WiFi Password",
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      prefixIcon: const Icon(Icons.lock_outline, color: Colors.white54, size: 20),
+                      border: const OutlineInputBorder(),
+                      enabledBorder: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white38)),
+                      focusedBorder: const OutlineInputBorder(
+                          borderSide: BorderSide(color: _themeGreen)),
+                      isDense: true,
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          wifiPasswordVisible
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                          color: Colors.white70,
+                          size: 20,
+                        ),
+                        onPressed: () {
+                          setDialogState(() {
+                            wifiPasswordVisible = !wifiPasswordVisible;
+                          });
+                        },
+                      ),
+                    ),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14),
+                    child: Divider(color: Colors.white24),
+                  ),
+
+                  // ── Section 2: MQTT Broker Settings (Topic, Port, IP, User, Password) ──
+                  Row(
+                    children: const [
+                      Icon(Icons.cloud_outlined, color: Colors.lightBlueAccent, size: 18),
+                      SizedBox(width: 8),
+                      Text(
+                        "MQTT Configuration",
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black26,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Text(
+                      "Format: MQTT:topic=${_mqttTopicController.text.trim()},port=${_mqttPortController.text.trim()},ip=${_mqttHostController.text.trim()},user=${_mqttUserController.text.trim()},password=***",
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 11,
+                        fontFamily: 'monospace',
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // topic
+                  TextField(
+                    controller: _mqttTopicController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      labelText: "topic",
+                      hintText: "",
+                      hintStyle: TextStyle(color: Colors.white30),
+                      labelStyle: TextStyle(color: Colors.white70),
+                      prefixIcon: Icon(Icons.tag_rounded, color: Colors.white54, size: 20),
+                      border: OutlineInputBorder(),
+                      enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white38)),
+                      focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.lightBlueAccent)),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // port & ip
+                  Row(
+                    children: [
+                      // port
+                      Expanded(
+                        flex: 2,
+                        child: TextField(
+                          controller: _mqttPortController,
+                          keyboardType: TextInputType.number,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            labelText: "port",
+                            hintText: "1883",
+                            hintStyle: TextStyle(color: Colors.white30),
+                            labelStyle: TextStyle(color: Colors.white70),
+                            border: OutlineInputBorder(),
+                            enabledBorder: OutlineInputBorder(
+                                borderSide: BorderSide(color: Colors.white38)),
+                            focusedBorder: OutlineInputBorder(
+                                borderSide: BorderSide(color: Colors.lightBlueAccent)),
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // ip
+                      Expanded(
+                        flex: 3,
+                        child: TextField(
+                          controller: _mqttHostController,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: const InputDecoration(
+                            labelText: "ip",
+                            hintText: "e.g. 192.168.1.100",
+                            hintStyle: TextStyle(color: Colors.white30),
+                            labelStyle: TextStyle(color: Colors.white70),
+                            prefixIcon: Icon(Icons.dns_outlined, color: Colors.white54, size: 20),
+                            border: OutlineInputBorder(),
+                            enabledBorder: OutlineInputBorder(
+                                borderSide: BorderSide(color: Colors.white38)),
+                            focusedBorder: OutlineInputBorder(
+                                borderSide: BorderSide(color: Colors.lightBlueAccent)),
+                            isDense: true,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+
+                  // user
+                  TextField(
+                    controller: _mqttUserController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      labelText: "user",
+                      hintText: "e.g. mqtt_user",
+                      hintStyle: TextStyle(color: Colors.white30),
+                      labelStyle: TextStyle(color: Colors.white70),
+                      prefixIcon: Icon(Icons.person_outline, color: Colors.white54, size: 20),
+                      border: OutlineInputBorder(),
+                      enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white38)),
+                      focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.lightBlueAccent)),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // password
+                  TextField(
+                    controller: _mqttPassController,
+                    obscureText: !mqttPasswordVisible,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: "password",
+                      hintText: "e.g. mqtt_password",
+                      hintStyle: const TextStyle(color: Colors.white30),
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      prefixIcon: const Icon(Icons.key_outlined, color: Colors.white54, size: 20),
+                      border: const OutlineInputBorder(),
+                      enabledBorder: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.white38)),
+                      focusedBorder: const OutlineInputBorder(
+                          borderSide: BorderSide(color: Colors.lightBlueAccent)),
+                      isDense: true,
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          mqttPasswordVisible
+                              ? Icons.visibility
+                              : Icons.visibility_off,
+                          color: Colors.white70,
+                          size: 20,
+                        ),
+                        onPressed: () {
+                          setDialogState(() {
+                            mqttPasswordVisible = !mqttPasswordVisible;
+                          });
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text("Cancel",
-                    style: TextStyle(color: Colors.white70))),
-            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("Cancel", style: TextStyle(color: Colors.white70)),
+            ),
+            ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
-                  backgroundColor: _themeGreen, foregroundColor: Colors.black),
+                backgroundColor: _themeGreen,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+              icon: const Icon(Icons.send_rounded, size: 18),
+              label: const Text("Save & Connect", style: TextStyle(fontWeight: FontWeight.bold)),
               onPressed: () {
                 Navigator.pop(context);
                 _connectWifi();
               },
-              child: const Text("Send"),
             ),
           ],
         ),
@@ -885,38 +1152,85 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
     // Save primary credentials to local storage
     await LocalCacheService.saveWifiCredentials(ssid, pass);
 
-    setState(() {
-      _isWifiConnected = false;
-      _wifiStatus = "Connecting to WiFi...";
-      _isConnectingWifi = true;
-    });
+    // Save MQTT preferences
+    await _saveMqttPrefs();
 
-    // Send primary WiFi credentials
-    await _sendCommand("WIFI:$ssid,$pass");
-    await Future.delayed(const Duration(milliseconds: 300));
+    if (mounted) {
+      setState(() {
+        _isWifiConnected = false;
+        _wifiStatus = "Configuring WiFi & MQTT...";
+        _isConnectingWifi = true;
+      });
+    }
 
-    await _sendCommand("WIFI_CONNECT");
-    await Future.delayed(const Duration(milliseconds: 300));
-    await _sendCommand("WIFI_START");
+    // Pre-configure MQTT on device over Bluetooth in requested format: MQTT:topic=...,port=...,ip=...,user=...,password=...
+    final host = _mqttHostController.text.trim();
+    final port = int.tryParse(_mqttPortController.text.trim()) ?? 1883;
+    final user = _mqttUserController.text.trim();
+    final mPass = _mqttPassController.text.trim();
+    final topic = _mqttTopicController.text.trim();
+
+    if (host.isNotEmpty && topic.isNotEmpty) {
+      // Dynamic in-memory cache update
+      MqttConfigService.updateCachedCredentials(
+        topic: topic,
+        username: user,
+        password: mPass,
+        host: host,
+        port: port,
+      );
+
+      final combinedMqtt =
+          "MQTT:topic=$topic,port=$port,ip=$host,user=$user,password=$mPass";
+      debugPrint("📡 Pre-configuring MQTT settings on device: $combinedMqtt");
+      await _sendCommand(combinedMqtt);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      // Also send individual commands as fallback for older firmware support
+      await _sendCommand("MQTT_HOST:$host");
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _sendCommand("MQTT_PORT:$port");
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _sendCommand("MQTT_USER:$user");
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _sendCommand("MQTT_PASS:$mPass");
+      await Future.delayed(const Duration(milliseconds: 100));
+      await _sendCommand("MQTT_TOPIC:$topic");
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
 
     _showWifiLoadingDialog();
 
-    // Auto-dismiss loading dialog after 60 seconds if no response from device
-    Future.delayed(const Duration(seconds: 60), () {
-      if (_isConnectingWifi && mounted) {
+    // Send primary WiFi credentials (clean without trailing \r)
+    await _sendCommand("WIFI:$ssid,$pass");
+
+    // Optional follow-up connect trigger if device stays connected
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (mounted && !_hasNavigatedAway && _connection.isConnected && _isConnectingWifi) {
+      await _sendCommand("WIFI_CONNECT");
+    }
+
+    // Automatically route directly to AC Control page once credentials are sent
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted && !_hasNavigatedAway) {
         _hideWifiLoadingDialog();
-        setState(() {
-          _isConnectingWifi = false;
-          _wifiStatus = "WiFi connection timeout ⏳";
-        });
-        _showSnack("WiFi connection timeout. Check device.", _orange);
+        if (mounted) {
+          setState(() {
+            _isConnectingWifi = false;
+            _isWifiConnected = true;
+            _wifiStatus = "WiFi credentials applied. Device active on WiFi ✅";
+          });
+        }
+        _saveWifiStatus(true, ip: _wifiIP);
+        _saveLocalDeviceToCache(_wifiIP);
+        _routeToSystemPage();
       }
     });
   }
 
   // ===================== MQTT =====================
   Future<void> _sendMqttSettingsToDevice({bool connect = false}) async {
-    if (!_isWifiConnected) return;
+    if (!mounted || _hasNavigatedAway || !_isWifiConnected) return;
 
     final host = _mqttHostController.text.trim();
     final port = int.tryParse(_mqttPortController.text.trim()) ?? 1883;
@@ -928,13 +1242,32 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
     await _saveMqttPrefs();
 
+    MqttConfigService.updateCachedCredentials(
+      topic: topic,
+      username: user,
+      password: pass,
+      host: host,
+      port: port,
+    );
+
+    final combinedMqtt =
+        "MQTT:topic=$topic,port=$port,ip=$host,user=$user,password=$pass";
+    debugPrint("📡 Sending MQTT settings to device: $combinedMqtt");
+    await _sendCommand(combinedMqtt);
+    await Future.delayed(const Duration(milliseconds: 200));
+
     await _sendCommand("MQTT_HOST:$host");
+    await Future.delayed(const Duration(milliseconds: 100));
     await _sendCommand("MQTT_PORT:$port");
+    await Future.delayed(const Duration(milliseconds: 100));
     await _sendCommand("MQTT_USER:$user");
+    await Future.delayed(const Duration(milliseconds: 100));
     await _sendCommand("MQTT_PASS:$pass");
+    await Future.delayed(const Duration(milliseconds: 100));
     await _sendCommand("MQTT_TOPIC:$topic");
 
-    if (connect) {
+    if (connect && mounted && !_hasNavigatedAway) {
+      await Future.delayed(const Duration(milliseconds: 150));
       await _sendCommand("MQTT_CONNECT");
     }
   }
@@ -1266,178 +1599,163 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
 
   // ===================== Helpers =====================
   void _log(String msg) {
-    final t = DateFormat("HH:mm:ss").format(DateTime.now());
-    _terminalController.text += "[$t] $msg\n";
+    if (!mounted || _hasNavigatedAway) return;
+    try {
+      final t = DateFormat("HH:mm:ss").format(DateTime.now());
+      _terminalController.text += "[$t] $msg\n";
 
-    // Throttle UI updates for logs if they come in too fast
-    if (!_needsUpdate) {
-      _needsUpdate = true;
-      Future.delayed(const Duration(milliseconds: 100), () {
-        if (mounted && _needsUpdate) {
-          setState(() {
-            _needsUpdate = false;
-          });
-        }
-      });
-    }
+      // Throttle UI updates for logs if they come in too fast
+      if (!_needsUpdate) {
+        _needsUpdate = true;
+        Future.delayed(const Duration(milliseconds: 100), () {
+          if (mounted && !_hasNavigatedAway && _needsUpdate) {
+            setState(() {
+              _needsUpdate = false;
+            });
+          }
+        });
+      }
+    } catch (_) {}
   }
 
   void _showSnack(String msg, Color c) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: c));
+    if (!mounted || _hasNavigatedAway) return;
+    try {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg), backgroundColor: c));
+    } catch (_) {}
   }
 
   void _showWifiLoadingDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Center(
-        child: Container(
-          width: 100,
-          height: 100,
-          decoration: BoxDecoration(
-            color: _cardBackground,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.4),
-                blurRadius: 30,
-                offset: const Offset(0, 15),
-              ),
-              BoxShadow(
-                color: _themeGreen.withValues(alpha: 0.15),
-                blurRadius: 20,
-                offset: const Offset(0, 0),
-              ),
-            ],
-          ),
-          child: Center(
-            child: CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation<Color>(_themeGreen),
-              strokeWidth: 4.5,
-              strokeCap: StrokeCap.round,
-            ),
-          ),
-        ),
-      ),
-    );
+    // Modal dialog removed per user request: "remove the dialoogue box wifii conncte wifi to route ac control page only"
+    // Status is dynamically shown in the UI without blocking dialogues
   }
 
   void _hideWifiLoadingDialog() {
-    if (_isConnectingWifi && mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
+    if (mounted && !_hasNavigatedAway) {
       setState(() => _isConnectingWifi = false);
     }
   }
 
   void _showReconnectDialog() {
-    if (!mounted) return;
+    if (!mounted || _hasNavigatedAway || _isWifiConnected || _isConnectingWifi) {
+      return;
+    }
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        backgroundColor: _cardBackground,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-        ),
-        title: Row(
-          children: [
-            Icon(Icons.bluetooth_disabled, color: _red, size: 28),
-            const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                "Bluetooth Disconnected",
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          backgroundColor: _cardBackground,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.bluetooth_disabled, color: _red, size: 28),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  "Bluetooth Disconnected",
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "Connection to ${_device.name ?? 'device'} lost.\nReason: ${_disconnectDisplayReason(_lastDisconnectReason)}\nTime: $_lastDisconnectTime",
-              style: const TextStyle(fontSize: 15, color: Colors.white70),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              "Hint: ${_disconnectHint(_lastDisconnectReason)}",
-              style: const TextStyle(
-                  fontSize: 12,
-                  color: Colors.white54,
-                  fontStyle: FontStyle.italic),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: _themeGreen.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _themeGreen.withValues(alpha: 0.3)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                "Connection to ${_device.name ?? 'device'} lost.\nReason: ${_disconnectDisplayReason(_lastDisconnectReason)}\nTime: $_lastDisconnectTime",
+                style: const TextStyle(fontSize: 15, color: Colors.white70),
               ),
-              child: const Row(
-                children: [
-                  Icon(Icons.info_outline, color: Colors.white70, size: 20),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      "Device is still on. Ready to reconnect.",
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                        color: Colors.white,
+              const SizedBox(height: 4),
+              Text(
+                "Hint: ${_disconnectHint(_lastDisconnectReason)}",
+                style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.white54,
+                    fontStyle: FontStyle.italic),
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: _themeGreen.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _themeGreen.withValues(alpha: 0.3)),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(Icons.info_outline, color: Colors.white70, size: 20),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "Device is still on. Ready to reconnect.",
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                try {
+                  Navigator.pop(context);
+                } catch (_) {}
+                _disconnectBluetooth();
+              },
+              child: const Text(
+                "Go Back",
+                style: TextStyle(color: Colors.white70),
+              ),
+            ),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _themeGreen,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              ),
+              onPressed: () {
+                try {
+                  Navigator.pop(context);
+                } catch (_) {}
+                _attemptReconnect();
+              },
+              icon: const Icon(Icons.bluetooth_connected, size: 20),
+              label: const Text(
+                "Reconnect",
+                style: TextStyle(fontWeight: FontWeight.bold),
               ),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _disconnectBluetooth();
-            },
-            child: const Text(
-              "Go Back",
-              style: TextStyle(color: Colors.white70),
-            ),
-          ),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _themeGreen,
-              foregroundColor: Colors.black,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            ),
-            onPressed: () {
-              Navigator.pop(context);
-              _attemptReconnect();
-            },
-            icon: const Icon(Icons.bluetooth_connected, size: 20),
-            label: const Text(
-              "Reconnect",
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ),
-        ],
-      ),
-    );
+      );
+    } catch (_) {}
   }
 
   Future<void> _attemptReconnect() async {
     _showLoadingDialog("Reconnecting...");
 
     try {
+      try {
+        await _connection.close();
+      } catch (_) {}
       final connection = await BluetoothConnection.toAddress(_device.address);
-      if (connection.isConnected && mounted) {
+      if (connection.isConnected && mounted && !_hasNavigatedAway) {
         _hideLoadingDialog();
         setState(() {
           _connection = connection;
@@ -1448,7 +1766,7 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
         _showSnack("Reconnected successfully ✅", _green);
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && !_hasNavigatedAway) {
         _hideLoadingDialog();
         _showSnack("Failed to reconnect. Try again.", _red);
       }
@@ -1456,65 +1774,106 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
   }
 
   void _showLoadingDialog(String message) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Center(
-        child: Container(
-          width: 100,
-          height: 100,
-          decoration: BoxDecoration(
-            color: _cardBackground,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.4),
-                blurRadius: 30,
-                offset: const Offset(0, 15),
+    if (!mounted || _hasNavigatedAway) return;
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => Center(
+          child: Container(
+            width: 100,
+            height: 100,
+            decoration: BoxDecoration(
+              color: _cardBackground,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.4),
+                  blurRadius: 30,
+                  offset: const Offset(0, 15),
+                ),
+                BoxShadow(
+                  color: _themeGreen.withValues(alpha: 0.15),
+                  blurRadius: 20,
+                  offset: const Offset(0, 0),
+                ),
+              ],
+            ),
+            child: Center(
+              child: CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(_themeGreen),
+                strokeWidth: 4.5,
+                strokeCap: StrokeCap.round,
               ),
-              BoxShadow(
-                color: _themeGreen.withValues(alpha: 0.15),
-                blurRadius: 20,
-                offset: const Offset(0, 0),
-              ),
-            ],
-          ),
-          child: Center(
-            child: CircularProgressIndicator(
-              valueColor: AlwaysStoppedAnimation<Color>(_themeGreen),
-              strokeWidth: 4.5,
-              strokeCap: StrokeCap.round,
             ),
           ),
         ),
-      ),
-    );
+      );
+    } catch (_) {}
   }
 
   void _hideLoadingDialog() {
     if (mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
+      try {
+        Navigator.of(context, rootNavigator: true).pop();
+      } catch (_) {}
     }
   }
 
   void _disconnectBluetooth() {
-    if (_connection.isConnected) _connection.close();
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => const BluetoothScannerPage()),
-      (_) => false,
-    );
+    if (_hasNavigatedAway) return;
+    _hasNavigatedAway = true;
+    _bluetoothStateTimer?.cancel();
+    _btStreamSub?.cancel();
+    _btStreamSub = null;
+
+    try {
+      if (_connection.isConnected) _connection.close();
+    } catch (_) {}
+
+    if (!mounted) return;
+    try {
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const BluetoothScannerPage()),
+        (_) => false,
+      );
+    } catch (_) {}
   }
 
   void _routeToSystemPage() {
-    if (_connection.isConnected) _connection.close();
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const MainNavigationPage(initialIndex: 0),
-      ),
-      (_) => false,
-    );
+    if (_hasNavigatedAway) return;
+    _hasNavigatedAway = true;
+    _hideWifiLoadingDialog();
+    _bluetoothStateTimer?.cancel();
+    _btStreamSub?.cancel();
+    _btStreamSub = null;
+
+    try {
+      if (_connection.isConnected) {
+        _connection.close();
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    try {
+      final wifiMac = _getWifiMac(_device.address);
+      final mac = wifiMac.replaceAll(':', '').toUpperCase();
+      final shortId = mac.length >= 8 ? mac.substring(mac.length - 8) : mac;
+      final devName = _device.name ?? 'Smart AC Controller';
+
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ACControlPage(
+            deviceName: devName,
+            systemId: mac,
+            systemShortId: shortId,
+          ),
+        ),
+        (_) => false,
+      );
+    } catch (_) {}
   }
 
   // ===================== Build =====================
@@ -1566,59 +1925,6 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
               autoOnController: _autoOnController,
               autoOffController: _autoOffController,
               onApplyAutoConfig: _sendAutoSetpointsToDevice,
-            )),
-            RepaintBoundary(
-                child: TemperatureWidget(
-              temperatureText: _temperatureText,
-              deviceTimeText: _deviceTimeText,
-              onRefreshTemp: () => _sendCommand("GET_TEMP"),
-              onRefreshTime: () => _sendCommand("GET_TIME"),
-              onSyncTime: () {
-                final now = DateTime.now();
-                final formatted = DateFormat('yyyy-MM-dd HH:mm:ss').format(now);
-                setState(() => _deviceTimeText = formatted);
-                _sendCommand("SET_TIME:$formatted");
-                Future.delayed(const Duration(milliseconds: 500), () {
-                  if (mounted) _sendCommand("GET_TIME");
-                });
-              },
-            )),
-            RepaintBoundary(
-                child: ACControlWidget(
-              themeGreen: _themeGreen,
-              brandItems: _brandDropdownItems(),
-              showDefaultRemoteDropdown: _showDefaultRemoteDropdown,
-              onToggleDefaultRemoteDropdown: () => setState(() =>
-                  _showDefaultRemoteDropdown = !_showDefaultRemoteDropdown),
-              defaultRemoteBrand: _defaultRemoteBrand,
-              onDefaultBrandChanged: _setDefaultBrandOnDevice,
-              onPowerOn: () => _sendDefaultRemoteKey("POWER_ON"),
-              onPowerOff: () => _sendDefaultRemoteKey("POWER_OFF"),
-              onTempUp: () => _sendDefaultRemoteKey("TEMPUP"),
-              onTempDown: () => _sendDefaultRemoteKey("TEMPDOWN"),
-              onSwing: () => _sendDefaultRemoteKey("SWING"),
-              onMode: () => _sendDefaultRemoteKey("MODE"),
-              onTimeController: _onTimeController,
-              offTimeController: _offTimeController,
-              onPickOnTime: () => _pickTime(_onTimeController, "SCHEDULE_ON"),
-              onPickOffTime: () =>
-                  _pickTime(_offTimeController, "SCHEDULE_OFF"),
-              showRemoteConfigDropdown: _showRemoteConfigDropdown,
-              onToggleRemoteConfigDropdown: () => setState(
-                  () => _showRemoteConfigDropdown = !_showRemoteConfigDropdown),
-              configBrand: _configBrand,
-              onConfigBrandChanged: _setConfigBrandOnDevice,
-              configMode: _configMode,
-              waitingForIr: _waitingForIr,
-              cfgStepIndex: _cfgStepIndex,
-              cfgStepsCount: _cfgKeys.length,
-              learningProgress: _learningProgress,
-              cfgStatus: _cfgStatus,
-              currentCfgKey: _cfgKeys[_cfgStepIndex],
-              onStartConfigMode: _startConfigMode,
-              onTriggerCurrentKeyConfig: _triggerCurrentKeyConfig,
-              onShowSaveRemoteDialog: _showSaveRemoteDialog,
-              canSaveRemote: _cfgStatus.contains("All keys captured"),
             )),
             // RepaintBoundary(child: _buildTerminal()), // Hidden as requested
             const SizedBox(height: 16),

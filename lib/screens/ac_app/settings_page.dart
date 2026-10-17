@@ -9,6 +9,9 @@ import 'package:ir_blaster_ac/screens/ac_app/create_system_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/create_equipment_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/equipment_list_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/system_list_page.dart';
+import 'package:ir_blaster_ac/screens/ac_app/ir_learning_config_page.dart';
+
+import 'package:ir_blaster_ac/screens/ac_app/ac_config_management_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -18,6 +21,26 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  String? _email;
+  Map<String, dynamic>? _userData;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserData();
+  }
+
+  Future<void> _loadUserData() async {
+    final email = await AuthService.getEmail();
+    final userData = await AuthService.getUserData();
+    if (mounted) {
+      setState(() {
+        _email = email;
+        _userData = userData;
+      });
+    }
+  }
+
   Future<void> _handleLogout() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -85,6 +108,10 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 24),
 
+          // User Profile Card
+          _buildUserProfileCard(isDark, cardColor, borderColor, textColor, subtitleColor),
+          const SizedBox(height: 16),
+
 
 
           // ── App Configuration ──
@@ -121,12 +148,104 @@ class _SettingsPageState extends State<SettingsPage> {
                       return Switch.adaptive(
                         value: themeProvider.isDarkMode,
                         onChanged: (val) => themeProvider.setDarkMode(val),
-                        activeColor: AppColors.primary,
+                        activeThumbColor: AppColors.primary,
                         activeTrackColor: AppColors.primarySurface,
                       );
                     },
                   ),
                 ],
+              ),
+              const Divider(height: 20),
+              // IR Remote Signal Configuration
+              InkWell(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const IRLearningConfigPage()),
+                  );
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.sensors_rounded, size: 18, color: subtitleColor),
+                          const SizedBox(width: 12),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'IR Remote Signal Config',
+                                style: GoogleFonts.inter(
+                                  color: textColor,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              Text(
+                                'Capture & Erase ON/OFF & Temp Signals (MQTT)',
+                                style: GoogleFonts.inter(
+                                  color: subtitleColor,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      Icon(Icons.chevron_right_rounded, size: 20, color: subtitleColor),
+                    ],
+                  ),
+                ),
+              ),
+              const Divider(height: 20),
+              // AC Brand & Command Configuration
+              InkWell(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AcConfigManagementPage()),
+                  );
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 4.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.developer_board_rounded, size: 18, color: subtitleColor),
+                          const SizedBox(width: 12),
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'AC Brands & Commands Config',
+                                style: GoogleFonts.inter(
+                                  color: textColor,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              Text(
+                                'Manage Brands, Models, Commands & Address Mappings',
+                                style: GoogleFonts.inter(
+                                  color: subtitleColor,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      Icon(Icons.chevron_right_rounded, size: 20, color: subtitleColor),
+                    ],
+                  ),
+                ),
               ),
             ],
           ),
@@ -401,6 +520,91 @@ class _SettingsPageState extends State<SettingsPage> {
                 fontWeight: FontWeight.w600,
               ),
               overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUserProfileCard(
+    bool isDark,
+    Color cardColor,
+    Color borderColor,
+    Color textColor,
+    Color subtitleColor,
+  ) {
+    final name = _userData?['name'] ?? _userData?['Name'] ?? 'User';
+    final role = AuthService.roleFromUserData(_userData);
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: borderColor),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: isDark ? 0.2 : 0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 28,
+            backgroundColor: AppColors.primary.withValues(alpha: 0.1),
+            child: const Icon(
+              Icons.person_rounded,
+              color: AppColors.primary,
+              size: 28,
+            ),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name,
+                  style: GoogleFonts.outfit(
+                    color: textColor,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _email ?? 'Loading...',
+                  style: GoogleFonts.inter(
+                    color: subtitleColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w400,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (role.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      role.toUpperCase(),
+                      style: GoogleFonts.inter(
+                        color: AppColors.primary,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
         ],

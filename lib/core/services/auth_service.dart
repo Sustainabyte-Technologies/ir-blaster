@@ -1,13 +1,34 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:ir_blaster_ac/core/services/local_cache_service.dart';
 import 'package:ir_blaster_ac/core/config/app_config.dart';
+import 'package:ir_blaster_ac/screens/ac_app/sigin.dart';
 
 /// Handles authentication and session management using ProvisionService API.
 class AuthService {
+  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+  static bool _isRedirectingToLogin = false;
+
+  static Future<void> logoutAndRedirect() async {
+    if (_isRedirectingToLogin) return;
+    _isRedirectingToLogin = true;
+    try {
+      debugPrint('🔐 [AuthService] Logging out and redirecting to SignInPage...');
+      await logout();
+      final navState = navigatorKey.currentState;
+      if (navState != null) {
+        await navState.pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const SignInPage()),
+          (route) => false,
+        );
+      }
+    } finally {
+      _isRedirectingToLogin = false;
+    }
+  }
   // ── Storage keys ────────────────────────────────────────────────────
   static const String _cookieKey = 'session_cookie';
   static const String _emailKey = 'user_email';
@@ -204,53 +225,44 @@ class AuthService {
   static bool _isPerformingSilentLogin = false;
 
   /// Ensures that we have a valid session and user details.
-  /// If not, or if the current session is invalid/expired, perform a silent login.
+  /// If not, or if the current session is invalid/expired, log out and redirect to sign in.
   static Future<void> ensureAuthenticated() async {
     if (_isPerformingSilentLogin) return;
     _isPerformingSilentLogin = true;
     try {
       final token = await _storage.read(key: _cookieKey);
-      final companyId = await _storage.read(key: _companyIdKey);
 
       if (token == null || token.isEmpty) {
-        debugPrint('🔐 [AuthService] No active token. Skipping silent login.');
+        debugPrint('🔐 [AuthService] No active token.');
         return;
       }
 
-      bool needLogin = companyId == null || companyId.isEmpty;
+      bool needLogout = false;
 
-      if (!needLogin) {
-        // Double check session validity with the backend verify endpoint.
-        final response = await http.get(
-          Uri.parse(AppConfig.verifyEndpoint),
-          headers: {
-            'Cookie': 'auth_token=$token',
-            'Content-Type': 'application/json',
-          },
-        ).timeout(const Duration(seconds: 5));
+      // Double check session validity with the backend verify endpoint.
+      final response = await http.get(
+        Uri.parse(AppConfig.verifyEndpoint),
+        headers: {
+          'Cookie': 'auth_token=$token',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 5));
 
-        if (response.statusCode == 200) {
-          final body = jsonDecode(response.body);
-          if (body['status'] != 1) {
-            needLogin = true;
-          }
-        } else {
-          needLogin = true;
+      if (response.statusCode == 200) {
+        final body = jsonDecode(response.body);
+        if (body['status'] != 1) {
+          needLogout = true;
         }
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        needLogout = true;
       }
 
-      if (needLogin) {
-        debugPrint(
-            '🔐 [AuthService] Session invalid or expired. Performing silent background login...');
-        final error = await login('dharunsuperadmin@sustainabyte.ai', '123');
-        if (error != null) {
-          debugPrint('❌ [AuthService] Silent login failed: $error');
-        } else {
-          debugPrint('✅ [AuthService] Silent login completed successfully.');
-        }
+      if (needLogout) {
+        debugPrint('🔐 [AuthService] Session invalid or expired. Logging out...');
+        await logoutAndRedirect();
       }
     } catch (e) {
-      debugPrint('❌ [AuthService] Silent login exception: $e');
+      debugPrint('❌ [AuthService] Session verify error: $e');
     } finally {
       _isPerformingSilentLogin = false;
     }
@@ -279,7 +291,15 @@ class AuthService {
             await _persistUserData(userData);
             return userData;
           }
+        } else {
+          debugPrint('🔐 [AuthService] verify returned status != 1. Logging out...');
+          await logoutAndRedirect();
+          return null;
         }
+      } else if (response.statusCode == 401 || response.statusCode == 403) {
+        debugPrint('🔐 [AuthService] verify returned ${response.statusCode}. Logging out...');
+        await logoutAndRedirect();
+        return null;
       }
       return null;
     } catch (e) {

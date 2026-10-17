@@ -8,6 +8,9 @@ import 'package:ir_blaster_ac/screens/ac_app/ac_control_page.dart';
 import 'package:ir_blaster_ac/screens/bluetooth_scanner_page.dart';
 import 'package:ir_blaster_ac/core/services/mqtt_service.dart';
 import 'package:ir_blaster_ac/screens/widgets/wifi_management_dialog.dart';
+import 'package:ir_blaster_ac/core/services/auth_service.dart';
+import 'package:ir_blaster_ac/screens/ac_app/admin_panel_page.dart';
+import 'package:ir_blaster_ac/screens/ac_app/sigin.dart';
 
 class MainNavigationPage extends StatefulWidget {
   final int initialIndex;
@@ -191,28 +194,31 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
               ),
               const SizedBox(width: 12),
               // User Avatar
-              Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [AppColors.primary, AppColors.primaryLight],
-                  ),
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.primary.withValues(alpha: 0.2),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
+              GestureDetector(
+                onTap: () => _showProfilePopup(context),
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [AppColors.primary, AppColors.primaryLight],
                     ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.person_rounded,
-                  color: Colors.white,
-                  size: 20,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppColors.primary.withValues(alpha: 0.2),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.person_rounded,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                 ),
               ),
             ],
@@ -301,6 +307,223 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
           const SizedBox(height: 7),
         Icon(icon, color: color, size: 22),
       ],
+    );
+  }
+
+  void _showProfilePopup(BuildContext context) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final userData = await AuthService.getUserData();
+    final email = await AuthService.getEmail();
+    final role = AuthService.roleFromUserData(userData);
+    final isAdmin = AuthService.isPlatformAdminRole(role) ||
+        AuthService.isCompanyAdminRole(role) ||
+        AuthService.isAdminRole(role) ||
+        AuthService.isSiteAdminRole(role);
+
+    if (!context.mounted) return;
+
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.2),
+      builder: (context) => Stack(
+        children: [
+          Positioned(
+            top: 70,
+            right: 20,
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: 260,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: isDark ? AppColors.surfaceDark : Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: (isDark ? Colors.white : Colors.black).withOpacity(0.08),
+                    width: 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.2),
+                      blurRadius: 20,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Profile Header
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 20,
+                          backgroundColor: AppColors.primary.withOpacity(0.1),
+                          child: const Icon(Icons.person_rounded, color: AppColors.primary, size: 20),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                userData?['name'] ?? userData?['Name'] ?? 'User',
+                                style: GoogleFonts.poppins(
+                                  color: isDark ? Colors.white : const Color(0xFF1B172E),
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              Text(
+                                email ?? '',
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.poppins(
+                                  color: (isDark ? Colors.white : const Color(0xFF1B172E)).withOpacity(0.5),
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                    const Divider(height: 1),
+                    const SizedBox(height: 16),
+
+                    if (isAdmin) ...[
+                      _menuItem(
+                        icon: Icons.admin_panel_settings_outlined,
+                        label: 'Admin Panel',
+                        isDark: isDark,
+                        onTap: () {
+                          Navigator.pop(context);
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => const AdminPanelPage(),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+
+                    // Logout Item
+                    _menuItem(
+                      icon: Icons.logout_rounded,
+                      label: 'Logout',
+                      isDark: isDark,
+                      color: const Color(0xFFEF4444),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _showLogoutDialog(context);
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _menuItem({
+    required IconData icon,
+    required String label,
+    required bool isDark,
+    required VoidCallback onTap,
+    Widget? trailing,
+    Color? color,
+  }) {
+    final baseColor = color ?? (isDark ? Colors.white : const Color(0xFF1B172E));
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        child: Row(
+          children: [
+            Icon(icon, color: baseColor.withOpacity(0.7), size: 18),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                label,
+                style: GoogleFonts.poppins(
+                  color: baseColor,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (trailing != null) trailing,
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showLogoutDialog(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    showDialog(
+      context: context,
+      builder: (context) => Stack(
+        children: [
+          AlertDialog(
+            backgroundColor: isDark ? const Color(0xFF2D2D44) : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text(
+              'Logout',
+              style: GoogleFonts.poppins(
+                color: isDark ? Colors.white : const Color(0xFF1B172E),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            content: Text(
+              'Are you sure you want to sign out of your account?',
+              style: GoogleFonts.poppins(
+                color: (isDark ? Colors.white : const Color(0xFF1B172E)).withOpacity(0.7),
+                fontSize: 14,
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(
+                  'Cancel',
+                  style: GoogleFonts.poppins(
+                    color: (isDark ? Colors.white : const Color(0xFF1B172E)).withOpacity(0.5),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: () async {
+                  await AuthService.logout();
+                  if (context.mounted) {
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(builder: (_) => const SignInPage()),
+                      (route) => false,
+                    );
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: const Text('Logout'),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

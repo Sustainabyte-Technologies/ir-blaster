@@ -9,6 +9,8 @@ class MqttCredentials {
   final String topic;
   final String username;
   final String password;
+  final String? host;
+  final int? port;
   final bool? oem;
   final bool? ems;
   final String? type;
@@ -17,16 +19,31 @@ class MqttCredentials {
     required this.topic,
     required this.username,
     required this.password,
+    this.host,
+    this.port,
     this.oem,
     this.ems,
     this.type,
   });
 
   factory MqttCredentials.fromJson(Map<String, dynamic> json) {
+    int? parsedPort;
+    final rawPort = json['port'] ?? json['Port'];
+    if (rawPort != null) {
+      parsedPort = int.tryParse(rawPort.toString());
+    }
+    final rawHost = json['ip'] ??
+        json['IP'] ??
+        json['host'] ??
+        json['Host'] ??
+        json['broker'] ??
+        json['Broker'];
     return MqttCredentials(
       topic: (json['topic'] ?? json['Topic'] ?? '').toString(),
       username: (json['username'] ?? json['Username'] ?? '').toString(),
       password: (json['password'] ?? json['Password'] ?? '').toString(),
+      host: rawHost?.toString(),
+      port: parsedPort,
       oem: json['oem'] ?? json['OEM'],
       ems: json['ems'] ?? json['EMS'],
       type: (json['type'] ?? json['Type'])?.toString(),
@@ -35,7 +52,7 @@ class MqttCredentials {
 
   @override
   String toString() =>
-      'MqttCredentials(topic: $topic, username: $username, type: $type)';
+      'MqttCredentials(topic: $topic, username: $username, host: $host, port: $port, type: $type)';
 }
 
 /// Service that fetches MQTT configuration (username, password, topic)
@@ -58,6 +75,26 @@ class MqttConfigService {
   static void clearCache() {
     _cached = null;
     debugPrint('🔧 [MqttConfigService] Cache cleared');
+  }
+
+  /// Manually update or override the cached MQTT credentials (e.g. from user config screen)
+  static void updateCachedCredentials({
+    required String topic,
+    required String username,
+    required String password,
+    String? host,
+    int? port,
+    String? type,
+  }) {
+    _cached = MqttCredentials(
+      topic: topic,
+      username: username,
+      password: password,
+      host: host,
+      port: port,
+      type: type ?? 'AC',
+    );
+    debugPrint('💾 [MqttConfigService] Updated cached credentials: $_cached');
   }
 
   /// Fetches MQTT credentials from the API for the logged-in user's company.
