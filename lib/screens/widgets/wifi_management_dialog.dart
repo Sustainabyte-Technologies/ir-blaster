@@ -161,7 +161,13 @@ class _WifiManagementDialogState extends State<WifiManagementDialog> {
     // Pre-fill MQTT fields from current config
     _mqttHostCtrl.text = AppConfig.mqttBroker;
     _mqttPortCtrl.text = AppConfig.mqttPort.toString();
-    _mqttTopicCtrl.text = AppConfig.mqttRoot;
+    final devId = widget.deviceId ?? '';
+    final root = AppConfig.mqttRoot;
+    if (devId.isNotEmpty && !root.toLowerCase().contains(devId.toLowerCase())) {
+      _mqttTopicCtrl.text = '$root/$devId';
+    } else {
+      _mqttTopicCtrl.text = root;
+    }
     _mqttUserCtrl.text = AppConfig.mqttUsername;
     _mqttPassCtrl.text = AppConfig.mqttPassword;
 

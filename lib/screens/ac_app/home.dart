@@ -3,10 +3,10 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:ir_blaster_ac/widgets/top_navbar.dart';
 import 'package:ir_blaster_ac/screens/ac_app/system_view.dart';
 import 'package:ir_blaster_ac/screens/ac_app/equipment_view.dart';
-import 'package:ir_blaster_ac/screens/ac_app/device_detail_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/ac_control_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/dashboard_screen.dart';
 import 'package:ir_blaster_ac/core/constants/colors.dart';
+import 'package:ir_blaster_ac/core/services/auth_service.dart';
 
 class HomePage extends StatefulWidget {
   final VoidCallback? onBack;
@@ -78,6 +78,8 @@ class _HomePageState extends State<HomePage> {
                       setState(() => _equipmentCount = count),
                   onEquipmentTap:
                       (equipmentId, name, systemId, systemShortId) async {
+                    final companyId = await AuthService.getCompanyId();
+                    if (!mounted) return;
                     await Navigator.push(
                       context,
                       MaterialPageRoute(
@@ -85,6 +87,8 @@ class _HomePageState extends State<HomePage> {
                           deviceName: name,
                           systemId: systemId,
                           systemShortId: systemShortId,
+                          equipmentId: equipmentId,
+                          companyId: companyId,
                         ),
                       ),
                     );
@@ -95,14 +99,26 @@ class _HomePageState extends State<HomePage> {
                   key: _systemViewKey,
                   onCountChanged: (count) =>
                       setState(() => _systemCount = count),
-                  onViewPressed: (systemId, systemName, systemShortId) async {
+                  onViewPressed: (
+                    systemId,
+                    systemName,
+                    systemShortId, {
+                    String? equipmentId,
+                    String? imei,
+                  }) async {
+                    final companyId = await AuthService.getCompanyId();
+                    if (!mounted) return;
                     await Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (context) => ACControlPage(
                           deviceName: systemName,
                           systemId: systemId,
-                          systemShortId: systemShortId,
+                          systemShortId: (imei != null && imei.isNotEmpty)
+                              ? imei
+                              : systemShortId,
+                          equipmentId: equipmentId,
+                          companyId: companyId,
                         ),
                       ),
                     );

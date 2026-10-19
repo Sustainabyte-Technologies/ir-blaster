@@ -303,7 +303,13 @@ class _ConfigurationPageState extends State<ConfigurationPage> {
       if (config != null && mounted) {
         setState(() {
           if (config.topic.isNotEmpty) {
-            _mqttTopicController.text = config.topic;
+            final devName = _device.name ?? '';
+            if (devName.isNotEmpty &&
+                !config.topic.toLowerCase().contains(devName.toLowerCase())) {
+              _mqttTopicController.text = '${config.topic}/$devName';
+            } else {
+              _mqttTopicController.text = config.topic;
+            }
           }
           if (config.port != null && config.port! > 0) {
             _mqttPortController.text = config.port.toString();

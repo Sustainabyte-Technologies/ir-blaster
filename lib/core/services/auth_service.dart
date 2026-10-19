@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:ir_blaster_ac/core/services/local_cache_service.dart';
+import 'package:ir_blaster_ac/core/services/mqtt_config_service.dart';
 import 'package:ir_blaster_ac/core/config/app_config.dart';
 import 'package:ir_blaster_ac/screens/ac_app/sigin.dart';
 
@@ -193,7 +194,16 @@ class AuthService {
             await _storage.write(key: _cookieKey, value: token);
             await _storage.write(key: _emailKey, value: email);
             if (userData is Map) {
-              await _persistUserData(Map<String, dynamic>.from(userData));
+              final userMap = Map<String, dynamic>.from(userData);
+              await _persistUserData(userMap);
+              final cId = extractCompanyId(userMap);
+              if (cId != null && cId.isNotEmpty) {
+                unawaited(MqttConfigService.fetchMqttConfig(
+                  companyId: cId,
+                  type: 'ac',
+                  forceRefresh: true,
+                ));
+              }
             }
 
             debugPrint(
@@ -397,6 +407,9 @@ class AuthService {
     await _storage.delete(key: _siteIdKey);
     await _storage.delete(key: _zoneIdKey);
 
+    // Clear dynamic MQTT cache
+    MqttConfigService.clearCache();
+
     // Also clear the general cache (SharedPreferences)
     await LocalCacheService.clearAll();
   }
@@ -409,6 +422,14 @@ class AuthService {
   }) async {
     await _storage.write(key: _companyIdKey, value: companyId);
     await _storage.write(key: _bucketKey, value: bucket);
+    MqttConfigService.clearCache();
+    if (companyId.isNotEmpty) {
+      unawaited(MqttConfigService.fetchMqttConfig(
+        companyId: companyId,
+        type: 'ac',
+        forceRefresh: true,
+      ));
+    }
   }
 
   /// Extract the role string from user data JSON.
@@ -462,6 +483,14 @@ class AuthService {
     }
     if (bucket != null && bucket.isNotEmpty) {
       await _storage.write(key: _bucketKey, value: bucket);
+    }
+    if (companyId.isNotEmpty) {
+      MqttConfigService.clearCache();
+      unawaited(MqttConfigService.fetchMqttConfig(
+        companyId: companyId,
+        type: 'ac',
+        forceRefresh: true,
+      ));
     }
     debugPrint(
         '✅ [AuthService] Selected site=$siteId company=$companyId zone=$zoneId');

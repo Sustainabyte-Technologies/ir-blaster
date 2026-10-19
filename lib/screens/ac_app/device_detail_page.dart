@@ -16,6 +16,7 @@ import 'package:ir_blaster_ac/core/services/local_cache_service.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'package:ir_blaster_ac/core/services/mqtt_service.dart';
+import 'package:ir_blaster_ac/core/services/mqtt_config_service.dart';
 import 'package:ir_blaster_ac/screens/ac_app/schedule_calendar_page.dart';
 
 class DeviceDetailPage extends StatefulWidget {
@@ -722,6 +723,10 @@ class _DeviceDetailPageState extends State<DeviceDetailPage>
 
     _isConnectingMqtt = true;
 
+    if (MqttConfigService.cached == null) {
+      await MqttConfigService.fetchMqttConfig(type: 'ac');
+    }
+
     final String broker = AppConfig.mqttBroker;
     final String username = AppConfig.mqttUsername;
     final String password = AppConfig.mqttPassword;
@@ -1231,6 +1236,9 @@ class _DeviceDetailPageState extends State<DeviceDetailPage>
     }
 
     // Slow Path: Fallback to one-off connection
+    if (MqttConfigService.cached == null) {
+      await MqttConfigService.fetchMqttConfig(type: 'ac');
+    }
     final String broker = AppConfig.mqttBroker;
     final String username = AppConfig.mqttUsername;
     final String password = AppConfig.mqttPassword;

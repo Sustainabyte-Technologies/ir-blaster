@@ -73,6 +73,9 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
   final Map<String, CapturedSignalDetail> _signalDetailMap = {};
   CapturedSignalDetail? _latestResponseDetail;
 
+  Timer? _apiSyncTimer;
+  Timer? _apiSyncSecondaryTimer;
+
   // Learned IR Signal Map (30 signals total: POWER ON, POWER OFF, 14 UP steps, 14 DOWN steps)
   final Map<String, bool> _learnedSignalMap = {
     'POWER_ON': false,
@@ -285,6 +288,8 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
 
   @override
   void dispose() {
+    _apiSyncTimer?.cancel();
+    _apiSyncSecondaryTimer?.cancel();
     _responseSub?.cancel();
     _stateSub?.cancel();
     super.dispose();
@@ -702,29 +707,15 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
     final cleanB = b.toLowerCase().trim();
     if (cleanA == cleanB) return true;
 
-    // Both are Sustainabyte non-test devices (e.g. Sustainabyte_ITir and Sustainabyte_ir)
-    final aIsTest = cleanA.contains('test');
-    final bIsTest = cleanB.contains('test');
-    if (aIsTest != bIsTest) {
-      return false; // One is testir, one is not -> never equivalent!
-    }
-    if (!aIsTest && !bIsTest &&
-        cleanA.contains('sustainabyte') &&
-        cleanB.contains('sustainabyte')) {
-      return true;
-    }
-
-    // Normalized match (ignore underscores, hyphens, spaces, "itir" vs "ir")
+    // Normalized match (ignore underscores, hyphens, spaces)
     final normA = cleanA
         .replaceAll('_', '')
         .replaceAll('-', '')
-        .replaceAll(' ', '')
-        .replaceAll('itir', 'ir');
+        .replaceAll(' ', '');
     final normB = cleanB
         .replaceAll('_', '')
         .replaceAll('-', '')
-        .replaceAll(' ', '')
-        .replaceAll('itir', 'ir');
+        .replaceAll(' ', '');
     if (normA == normB) return true;
 
     return false;
@@ -1132,7 +1123,13 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
   }
 
   bool _checkDeviceOnlineOrWarn({String actionName = 'perform this action'}) {
+    if (_mqttService.isBluetoothConnected) return true;
     if (!_isCurrentDeviceOnline) {
+      if (_mqttService.isConnected) {
+        debugPrint(
+            '⚠️ [IRLearningConfig] Device reported offline in local cache, but MQTT is connected. Proceeding with $actionName.');
+        return true;
+      }
       _showSnack(
         'Device is OFFLINE. Cannot $actionName until it is connected to Wi-Fi.',
         AppColors.offline,
@@ -1143,9 +1140,110 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
     return true;
   }
 
+  void _syncStatusViaApi({bool showFeedback = false}) {
+    _apiSyncTimer?.cancel();
+    _apiSyncSecondaryTimer?.cancel();
+
+    _apiSyncTimer = Timer(const Duration(milliseconds: 1200), () async {
+      await _fetchActiveStatusFromApi(showFeedback: showFeedback);
+    });
+
+    _apiSyncSecondaryTimer = Timer(const Duration(milliseconds: 3200), () async {
+      await _fetchActiveStatusFromApi(showFeedback: false);
+    });
+  }
+
+  Future<void> _fetchActiveStatusFromApi({bool showFeedback = false}) async {
+    try {
+      String companyId = await AuthService.getCompanyId() ?? '';
+      String siteId = await AuthService.getSiteId() ?? '';
+      String zoneId = await AuthService.getZoneId() ?? '';
+      final token = await AuthService.getCookieHeader() ?? '';
+
+      if (companyId.isEmpty && AppConfig.companyId.isNotEmpty) {
+        companyId = AppConfig.companyId;
+      }
+
+      if (siteId.isEmpty || zoneId.isEmpty || companyId.isEmpty) {
+        for (var e in _devices) {
+          if (companyId.isEmpty) {
+            final c = (e['companyId'] ?? e['CompanyId'] ?? '').toString();
+            if (c.isNotEmpty && c != '00000000-0000-0000-0000-000000000000') {
+              companyId = c;
+            }
+          }
+          if (siteId.isEmpty) {
+            final s = (e['siteId'] ?? e['SiteId'] ?? '').toString();
+            if (s.isNotEmpty && s != '00000000-0000-0000-0000-000000000000') {
+              siteId = s;
+            }
+          }
+          if (zoneId.isEmpty) {
+            final z = (e['zoneId'] ?? e['ZoneId'] ?? '').toString();
+            if (z.isNotEmpty && z != '00000000-0000-0000-0000-000000000000') {
+              zoneId = z;
+            }
+          }
+        }
+      }
+
+      if (companyId.isEmpty || siteId.isEmpty || zoneId.isEmpty) {
+        return;
+      }
+
+      final statusUrl =
+          '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId';
+      final response = await http.get(
+        Uri.parse(statusUrl),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Cookie': 'auth_token=$token',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(const Duration(seconds: 4));
+
+      if (response.statusCode == 200 && mounted) {
+        final body = jsonDecode(response.body);
+        final List<dynamic> systemsData = body['systems'] ?? [];
+        final target = _targetDeviceId.toLowerCase().trim();
+        final selected = _selectedDeviceId.toLowerCase().trim();
+
+        for (var sys in systemsData) {
+          final List<dynamic> eqs = sys['equipments'] ?? [];
+          for (var eq in eqs) {
+            final eqMap = Map<String, dynamic>.from(eq);
+            final eqId = (eq['equipmentId'] ?? eq['EquipmentId'] ?? eq['id'] ?? eq['Id'] ?? '')
+                .toString().toLowerCase().trim();
+            final sId = (eq['shortId'] ?? eq['ShortId'] ?? '')
+                .toString().toLowerCase().trim();
+            final imei = (eq['imei'] ?? eq['Imei'] ?? '')
+                .toString().toLowerCase().trim();
+            final name = (eq['name'] ?? eq['Name'] ?? '')
+                .toString().toLowerCase().trim();
+
+            final bool matches = (target.isNotEmpty && (eqId == target || sId == target || imei == target || name == target)) ||
+                (selected.isNotEmpty && (eqId == selected || sId == selected || imei == selected || name == selected));
+
+            if (matches) {
+              final statusStr = (eqMap['status'] ?? eqMap['Status'] ?? '').toString().toUpperCase().trim();
+              if (showFeedback && mounted && statusStr.isNotEmpty) {
+                _showSnack('API Status Confirmed: $statusStr', AppColors.coolBlue, icon: Icons.cloud_done_rounded);
+                _logAction('API Status Received', 'Status: $statusStr for $_targetDeviceId');
+              }
+              return;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ [IRLearningConfig] API status sync error: $e');
+    }
+  }
+
   void _triggerPowerOn() {
     if (!_checkDeviceOnlineOrWarn(actionName: 'send Power ON command')) return;
     _mqttService.turnAcOn(targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi(showFeedback: true);
     _logAction('Power Command Sent', 'AC_ON');
     _showSnack('⚡ Sent AC Power ON Command', AppColors.online,
         icon: Icons.power_rounded);
@@ -1154,6 +1252,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
   void _triggerPowerOff() {
     if (!_checkDeviceOnlineOrWarn(actionName: 'send Power OFF command')) return;
     _mqttService.turnAcOff(targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi(showFeedback: true);
     _logAction('Power Command Sent', 'AC_OFF');
     _showSnack('🔌 Sent AC Power OFF Command', AppColors.coolBlue,
         icon: Icons.power_off_rounded);
@@ -1162,6 +1261,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
   void _triggerTestSend(String cmd, String label) {
     if (!_checkDeviceOnlineOrWarn(actionName: 'transmit IR test signal')) return;
     _mqttService.sendControlCommand(cmd, targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi();
     _logAction('Test Signal Transmitted', '$cmd ($label)');
     _showSnack('📡 Transmitted IR Signal: $label', AppColors.primary,
         icon: Icons.sensors_rounded);
@@ -1175,6 +1275,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
     }
     _mqttService.sendStatus(targetDeviceId: _targetDeviceId);
     _mqttService.getLearnStatus(targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi(showFeedback: false);
     _logAction('Status Requested', 'STATUS & LEARN_STATUS');
   }
 
@@ -1218,6 +1319,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
       _lastSavedMessage = '';
     });
     _mqttService.learnOn(targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi();
     _logAction('Capture Command Sent', 'LEARN_ON (POWER ON)');
     _showSnack(
         '🎉 Capture Command Sent Successfully for POWER ON', AppColors.online);
@@ -1229,6 +1331,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
       _lastSavedMessage = '';
     });
     _mqttService.learnOff(targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi();
     _logAction('Capture Command Sent', 'LEARN_OFF (POWER OFF)');
     _showSnack(
         '🎉 Capture Command Sent Successfully for POWER OFF', AppColors.online);
@@ -1240,6 +1343,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
       _lastSavedMessage = '';
     });
     _mqttService.learnUp(temp, targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi();
     _logAction('Capture Command Sent', 'IR_LEARN_TEMP_UP:$temp (TEMP UP $temp°C)');
     _showSnack('🎉 Capture Command Sent Successfully for TEMP UP $temp°C',
         AppColors.online);
@@ -1251,6 +1355,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
       _lastSavedMessage = '';
     });
     _mqttService.learnDown(temp, targetDeviceId: _targetDeviceId);
+    _syncStatusViaApi();
     _logAction(
         'Capture Command Sent', 'IR_LEARN_TEMP_DOWN:$temp (TEMP DOWN $temp°C)');
     _showSnack('🎉 Capture Command Sent Successfully for TEMP DOWN $temp°C',
@@ -1267,6 +1372,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
         _signalDetailMap.remove('ON');
       });
       _mqttService.clearOn(targetDeviceId: _targetDeviceId);
+      _syncStatusViaApi();
       _logAction('Clear Command Sent', 'CLEAR_ON (POWER ON)');
       _showSnack('🗑️ Clear Command Sent Successfully for POWER ON',
           AppColors.coolBlue,
@@ -1284,6 +1390,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
         _signalDetailMap.remove('OFF');
       });
       _mqttService.clearOff(targetDeviceId: _targetDeviceId);
+      _syncStatusViaApi();
       _logAction('Clear Command Sent', 'CLEAR_OFF (POWER OFF)');
       _showSnack('🗑️ Clear Command Sent Successfully for POWER OFF',
           AppColors.coolBlue,
@@ -1302,6 +1409,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
         _signalDetailMap.remove('UP_$temp°C');
       });
       _mqttService.clearUp(temp, targetDeviceId: _targetDeviceId);
+      _syncStatusViaApi();
       _logAction('Clear Command Sent', 'CLEAR_UP:$temp (TEMP UP $temp°C)');
       _showSnack('🗑️ Clear Command Sent Successfully for TEMP UP $temp°C',
           AppColors.coolBlue,
@@ -1320,6 +1428,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
         _signalDetailMap.remove('DOWN_$temp°C');
       });
       _mqttService.clearDown(temp, targetDeviceId: _targetDeviceId);
+      _syncStatusViaApi();
       _logAction('Clear Command Sent', 'CLEAR_DOWN:$temp (TEMP DOWN $temp°C)');
       _showSnack('🗑️ Clear Command Sent Successfully for TEMP DOWN $temp°C',
           AppColors.coolBlue,
@@ -1338,6 +1447,7 @@ class _IRLearningConfigPageState extends State<IRLearningConfigPage> {
         _signalDetailMap.clear();
       });
       _mqttService.clearAll(targetDeviceId: _targetDeviceId);
+      _syncStatusViaApi();
       _logAction('Clear All Command Sent', 'CLEAR_ALL (Delete 30 files)');
       _showSnack('🗑️ Erase All Command Sent Successfully: CLEAR_ALL',
           AppColors.coolBlue,

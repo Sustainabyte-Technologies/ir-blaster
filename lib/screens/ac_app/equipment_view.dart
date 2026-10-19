@@ -137,8 +137,10 @@ class EquipmentViewPageState extends State<EquipmentViewPage> {
           final String localId = (localMap['id'] ?? '').toString();
           final exists = allEquips.any((e) {
             final eId = (e['id'] ?? e['Id'] ?? '').toString();
-            final eShortId = (e['shortId'] ?? e['ShortId'] ?? '').toString();
-            return eId == localId || eShortId == localMap['shortId'];
+            final eImei = (e['imei'] ?? e['Imei'] ?? e['deviceId'] ?? e['DeviceId'] ?? '').toString();
+            final localImei = (localMap['imei'] ?? localMap['deviceId'] ?? '').toString();
+            return (localId.isNotEmpty && eId == localId) ||
+                (localImei.isNotEmpty && eImei == localImei);
           });
           if (!exists) {
             allEquips.add(localMap);
@@ -362,9 +364,8 @@ class EquipmentViewPageState extends State<EquipmentViewPage> {
                           (eq['name'] ?? eq['Name'] ?? 'Unknown').toString();
                       final imei = (eq['imei'] ??
                                   eq['Imei'] ??
-                                  eq['shortId'] ??
-                                  eq['ShortId'] ??
-                                  eq['equipmentShortId'] ??
+                                  eq['deviceId'] ??
+                                  eq['DeviceId'] ??
                                   '')
                               .toString();
                       final equipmentId =
@@ -503,7 +504,7 @@ class EquipmentViewPageState extends State<EquipmentViewPage> {
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Text(
-                                        'ID: ',
+                                        'IMEI: ',
                                         style: GoogleFonts.inter(
                                           color: subtitleColor,
                                           fontSize: 11,

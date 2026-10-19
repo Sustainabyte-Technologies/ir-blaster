@@ -3,26 +3,38 @@ import 'package:google_fonts/google_fonts.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'dart:ui';
 import 'package:ir_blaster_ac/core/services/mqtt_service.dart';
 import 'package:ir_blaster_ac/core/constants/colors.dart';
 import 'package:ir_blaster_ac/core/config/app_config.dart';
 import 'package:ir_blaster_ac/core/services/auth_service.dart';
+import 'package:ir_blaster_ac/core/services/mqtt_config_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:ir_blaster_ac/core/services/local_cache_service.dart';
 import 'package:ir_blaster_ac/screens/bluetooth_scanner_page.dart';
 import 'package:ir_blaster_ac/screens/widgets/wifi_management_dialog.dart';
+import 'package:ir_blaster_ac/screens/ac_app/ac_control/widgets/top_message_bar.dart';
+import 'package:ir_blaster_ac/screens/ac_app/ac_control/dialogs/sse_info_dialog.dart';
+import 'package:ir_blaster_ac/screens/ac_app/ac_control/dialogs/weekly_days_selector.dart';
+
+part 'ac_control/dialogs/edit_schedule_dialog.dart';
+part 'ac_control/dialogs/schedules_sheet.dart';
+part 'ac_control/dialogs/automation_dialog.dart';
+part 'ac_control/widgets/ac_control_sections.dart';
 
 class ACControlPage extends StatefulWidget {
   final String? deviceName;
   final String? systemId;
   final String? systemShortId;
+  final String? equipmentId;
+  final String? companyId;
 
   const ACControlPage({
     super.key,
     this.deviceName,
     this.systemId,
     this.systemShortId,
+    this.equipmentId,
+    this.companyId,
   });
 
   @override
@@ -37,7 +49,7 @@ class _ACControlPageState extends State<ACControlPage>
 
   // Local UI state (updated from MQTT snapshots)
   bool _isConnected = false;
-  bool get _isControlAvailable => _isActive || _mqtt.isBluetoothConnected;
+  bool get _isControlAvailable => true; // Always allow user interactions and commands
   bool _isActive = false;
   bool _isPowerOn = false;
   int _setTemp = 24;
@@ -52,7 +64,6 @@ class _ACControlPageState extends State<ACControlPage>
   Timer? _loadingTimeoutTimer;
   String _selectedEquipmentName = '';
   String _selectedEquipmentId = '';
-  String _selectedEquipmentShortId = '';
   String _activeDeviceId = ''; // Target MQTT device ID (IMEI)
   String _activeDeviceImei = ''; // Target physical IMEI
 
@@ -62,7 +73,6 @@ class _ACControlPageState extends State<ACControlPage>
   String _schOn4 = 'DISABLED', _schOff4 = 'DISABLED';
   String _schOn5 = 'DISABLED', _schOff5 = 'DISABLED';
   String _lunchOn = 'DISABLED', _lunchOff = 'DISABLED';
-  List<int> _visibleSlots = [1, 2, 3];
 
   // Optimistic UI overrides for schedule switches (survives all rebuilds)
   final Map<int, bool> _schSwitchOverrides = {};
@@ -82,12 +92,22 @@ class _ACControlPageState extends State<ACControlPage>
   };
   final Map<int, DateTime> _userSchOverrideTime = {};
 
+  bool _isPlaceholderId(String? id) => MqttService.isPlaceholderId(id);
+
   String get _effectiveDeviceId {
-    if (_activeDeviceId.isNotEmpty) return _activeDeviceId;
-    if (widget.systemShortId != null && widget.systemShortId!.isNotEmpty) {
+    if (!_isPlaceholderId(_activeDeviceImei) && _activeDeviceImei.isNotEmpty) {
+      return _activeDeviceImei;
+    }
+    if (!_isPlaceholderId(_activeDeviceId) && _activeDeviceId.isNotEmpty) {
+      return _activeDeviceId;
+    }
+    if (_selectedEquipmentId.isNotEmpty) return _selectedEquipmentId;
+    if (widget.systemShortId != null &&
+        widget.systemShortId!.isNotEmpty &&
+        !_isPlaceholderId(widget.systemShortId)) {
       return widget.systemShortId!;
     }
-    return AppConfig.mqttDeviceId;
+    return '';
   }
 
   bool _isStateForActiveDevice(SirisDeviceState state) {
@@ -102,33 +122,44 @@ class _ACControlPageState extends State<ACControlPage>
 
     final activeId = _activeDeviceId.toLowerCase().trim();
     final activeImei = _activeDeviceImei.toLowerCase().trim();
-    final shortId = _selectedEquipmentShortId.toLowerCase().trim();
     final equipId = _selectedEquipmentId.toLowerCase().trim();
-    final equipName = _selectedEquipmentName.toLowerCase().trim();
-    final sysShort = (widget.systemShortId ?? '').toLowerCase().trim();
 
-    final directMatch = (activeId.isNotEmpty && (sDevId == activeId || sImei == activeId)) ||
-        (activeImei.isNotEmpty && (sDevId == activeImei || sImei == activeImei)) ||
-        (shortId.isNotEmpty && (sDevId == shortId || sImei == shortId)) ||
-        (equipId.isNotEmpty && (sDevId == equipId || sImei == equipId)) ||
-        (equipName.isNotEmpty && (sDevId == equipName || sImei == equipName)) ||
-        (sysShort.isNotEmpty && (sDevId == sysShort || sImei == sysShort));
+    final bool isStateImeiPlaceholder = _isPlaceholderId(sImei);
+    final bool isActiveImeiPlaceholder = _isPlaceholderId(activeImei);
 
-    if (directMatch) return true;
+    // Primary: match hardware device_id / IMEI
+    final bool devMatches = sDevId.isNotEmpty && (
+        (activeId.isNotEmpty && sDevId == activeId) ||
+        (activeImei.isNotEmpty && sDevId == activeImei) ||
+        (equipId.isNotEmpty && sDevId == equipId) ||
+        (activeId.isNotEmpty &&
+            sDevId.replaceAll('_', '').replaceAll('-', '') ==
+                activeId.replaceAll('_', '').replaceAll('-', ''))
+    );
+    if (devMatches) return true;
+
+    // Secondary: IMEI match ONLY if neither is a placeholder like 'numberIMEI'
+    if (!isStateImeiPlaceholder && !isActiveImeiPlaceholder) {
+      if (sImei == activeImei || (activeId.isNotEmpty && sImei == activeId)) {
+        return true;
+      }
+    }
 
     for (var eq in _equipmentsData) {
       final eqId = (eq['id'] ?? eq['Id'] ?? eq['equipmentId'] ?? eq['EquipmentId'] ?? '').toString().toLowerCase().trim();
-      final eqShort = (eq['shortId'] ?? eq['ShortId'] ?? '').toString().toLowerCase().trim();
       final eqImei = (eq['imei'] ?? eq['Imei'] ?? '').toString().toLowerCase().trim();
-      final eqName = (eq['equipmentName'] ?? eq['name'] ?? eq['EquipmentName'] ?? '').toString().toLowerCase().trim();
 
       final isCurrentSelected = (equipId.isNotEmpty && eqId == equipId) ||
-          (shortId.isNotEmpty && eqShort == shortId) ||
-          (activeId.isNotEmpty && (eqImei == activeId || eqShort == activeId || eqId == activeId));
+          (activeId.isNotEmpty && eqId == activeId) ||
+          (activeImei.isNotEmpty && eqImei == activeImei);
 
       if (isCurrentSelected) {
-        if ((sDevId.isNotEmpty && (sDevId == eqId || sDevId == eqShort || sDevId == eqImei || sDevId == eqName)) ||
-            (sImei.isNotEmpty && (sImei == eqId || sImei == eqShort || sImei == eqImei || sImei == eqName))) {
+        if (sDevId.isNotEmpty && (sDevId == eqId || (eqImei.isNotEmpty && sDevId == eqImei))) {
+          return true;
+        }
+        if (!isStateImeiPlaceholder &&
+            !_isPlaceholderId(eqImei) &&
+            sImei == eqImei) {
           return true;
         }
       }
@@ -139,37 +170,46 @@ class _ACControlPageState extends State<ACControlPage>
 
   bool _isResponseForActiveDevice(SirisResponse resp) {
     if (resp.deviceId == null || resp.deviceId!.isEmpty) {
+      // If we recently commanded power or temp on this active device, accept the acknowledgement
+      if (_pendingPower || _pendingTemp) return true;
       return _activeDeviceId.isEmpty && _selectedEquipmentId.isEmpty;
     }
     final rId = resp.deviceId!.toLowerCase().trim();
+    if (_isPlaceholderId(rId)) return false;
+
     final activeId = _activeDeviceId.toLowerCase().trim();
     final activeImei = _activeDeviceImei.toLowerCase().trim();
-    final shortId = _selectedEquipmentShortId.toLowerCase().trim();
     final equipId = _selectedEquipmentId.toLowerCase().trim();
-    final equipName = _selectedEquipmentName.toLowerCase().trim();
-    final sysShort = (widget.systemShortId ?? '').toLowerCase().trim();
+    final selectedName = _selectedEquipmentName.toLowerCase().trim();
 
-    if ((activeId.isNotEmpty && rId == activeId) ||
-        (activeImei.isNotEmpty && rId == activeImei) ||
-        (shortId.isNotEmpty && rId == shortId) ||
-        (equipId.isNotEmpty && rId == equipId) ||
-        (equipName.isNotEmpty && rId == equipName) ||
-        (sysShort.isNotEmpty && rId == sysShort)) {
+    final bool isActiveImeiPlaceholder = _isPlaceholderId(activeImei);
+
+    final cleanR = rId.replaceAll('_', '').replaceAll('-', '');
+    final cleanActive = activeId.replaceAll('_', '').replaceAll('-', '');
+    final cleanName = selectedName.replaceAll('_', '').replaceAll('-', '');
+
+    if ((activeId.isNotEmpty && (rId == activeId || cleanR == cleanActive)) ||
+        (!isActiveImeiPlaceholder && activeImei.isNotEmpty && rId == activeImei) ||
+        (selectedName.isNotEmpty && (rId == selectedName || cleanR == cleanName)) ||
+        (equipId.isNotEmpty && rId == equipId)) {
       return true;
     }
 
     for (var eq in _equipmentsData) {
       final eqId = (eq['id'] ?? eq['Id'] ?? eq['equipmentId'] ?? eq['EquipmentId'] ?? '').toString().toLowerCase().trim();
-      final eqShort = (eq['shortId'] ?? eq['ShortId'] ?? '').toString().toLowerCase().trim();
+      final eqName = (eq['name'] ?? eq['Name'] ?? eq['equipmentName'] ?? '').toString().toLowerCase().trim();
       final eqImei = (eq['imei'] ?? eq['Imei'] ?? '').toString().toLowerCase().trim();
-      final eqName = (eq['equipmentName'] ?? eq['name'] ?? eq['EquipmentName'] ?? '').toString().toLowerCase().trim();
 
       final isCurrentSelected = (equipId.isNotEmpty && eqId == equipId) ||
-          (shortId.isNotEmpty && eqShort == shortId) ||
-          (activeId.isNotEmpty && (eqImei == activeId || eqShort == activeId || eqId == activeId));
+          (selectedName.isNotEmpty && eqName == selectedName) ||
+          (activeId.isNotEmpty && (eqId == activeId || eqName == activeId)) ||
+          (activeImei.isNotEmpty && eqImei == activeImei);
 
       if (isCurrentSelected) {
-        if (rId == eqId || rId == eqShort || rId == eqImei || rId == eqName) {
+        if (rId == eqId ||
+            rId == eqName ||
+            cleanR == eqName.replaceAll('_', '').replaceAll('-', '') ||
+            (!_isPlaceholderId(eqImei) && rId == eqImei)) {
           return true;
         }
       }
@@ -308,7 +348,7 @@ class _ACControlPageState extends State<ACControlPage>
 
   void _startHeartbeatTimer() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer(const Duration(seconds: 30), () {
+    _heartbeatTimer = Timer(const Duration(seconds: 120), () {
       if (mounted) {
         setState(() {
           _isActive = false;
@@ -317,17 +357,11 @@ class _ACControlPageState extends State<ACControlPage>
     });
   }
 
-  // Additional state for interactivity mapping to the new UI features
-  String _mode = 'Cool';
-  String _fanSpeed = 'Auto';
-  bool _lightOn = true;
-  bool _swingV = false;
-  bool _swingH = false;
+  // Smart automation state
   bool _isAutomated = false;
   int _autoTemp = 22; // Smart automation temperature threshold (16–30°C)
 
-  // Air Quality mocks (dynamically stable around premium look values)
-  final int _tvoc = 0;
+  // Air Quality telemetry values
   final int _co2 = 0;
   final int _aqi = 0;
   final List<Map<String, dynamic>> _activityLogs = [];
@@ -339,8 +373,16 @@ class _ACControlPageState extends State<ACControlPage>
   bool _hasReceivedInitialState = false;
   DateTime? _lastPowerToggleTime;
   DateTime? _lastUserTempChangeTime;
+
+  // Equipment-scoped optimistic states to prevent cross-device lock leakage
+  final Map<String, DateTime> _equipmentPowerToggleTimes = {};
+  final Map<String, bool> _equipmentPendingPower = {};
+  final Map<String, DateTime> _equipmentUserTempTimes = {};
+  final Map<String, bool> _equipmentUserTempOverrides = {};
   Timer? _apiSyncTimer;
   Timer? _apiSyncSecondaryTimer;
+  Timer? _apiSyncTertiaryTimer;
+  Timer? _apiPollingTimer;
   OverlayEntry? _currentTopBanner;
   Timer? _topBannerTimer;
 
@@ -349,7 +391,7 @@ class _ACControlPageState extends State<ACControlPage>
   StreamSubscription? _connSub;
 
   bool _isReconnectingWifi = false;
-  String _reconnectingWifiSsid = '';
+  final String _reconnectingWifiSsid = '';
   Timer? _reconnectingWifiTimeoutTimer;
 
   Future<void> _loadWifiSsid() async {
@@ -367,6 +409,12 @@ class _ACControlPageState extends State<ACControlPage>
     }
   }
 
+  void updateUI([VoidCallback? fn]) {
+    if (mounted) {
+      setState(fn ?? () {});
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -379,11 +427,347 @@ class _ACControlPageState extends State<ACControlPage>
         AnimationController(vsync: this, duration: const Duration(seconds: 2))
           ..repeat();
 
+    // Immediately bind identity from incoming navigation parameters before any async network call
+    if (widget.equipmentId != null && widget.equipmentId!.isNotEmpty) {
+      _selectedEquipmentId = widget.equipmentId!;
+    }
+    if (widget.deviceName != null && widget.deviceName!.isNotEmpty) {
+      _selectedEquipmentName = widget.deviceName!;
+    }
+    final initialImei = (widget.systemShortId != null &&
+            widget.systemShortId!.isNotEmpty &&
+            !_isPlaceholderId(widget.systemShortId))
+        ? widget.systemShortId!
+        : '';
+    if (initialImei.isNotEmpty) {
+      _activeDeviceImei = initialImei;
+      _activeDeviceId = initialImei;
+      _mqtt.setDeviceId(initialImei, imei: initialImei);
+    }
+
     _loadWifiSsid();
+    _connectMqtt();
     _fetchEquipments();
     _loadCachedSchedules();
     _loadAutoTemp();
     _mqtt.addListener(_onMqttChanged);
+
+    // Continuous live status retrieval via API as requested
+    _apiPollingTimer?.cancel();
+    _apiPollingTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (mounted) {
+        _fetchStatusViaApi();
+      }
+    });
+  }
+
+  /// Fetches live equipment telemetry and on/off status directly from the REST API.
+  Future<void> _fetchStatusViaApi() async {
+    try {
+      final companyId = widget.companyId ?? await AuthService.getCompanyId() ?? '';
+      String siteId = await AuthService.getSiteId() ?? '';
+      final token = await AuthService.getCookieHeader() ?? '';
+      String zoneId = await AuthService.getZoneId() ?? '';
+
+      // Fallback zoneId & siteId from loaded equipment metadata
+      if ((zoneId.isEmpty || siteId.isEmpty) && _equipmentsData.isNotEmpty) {
+        for (var e in _equipmentsData) {
+          if (zoneId.isEmpty) {
+            final z = (e['zoneId'] ?? e['ZoneId'] ?? '').toString();
+            if (z.isNotEmpty && z != '00000000-0000-0000-0000-000000000000') {
+              zoneId = z;
+            }
+          }
+          if (siteId.isEmpty) {
+            final s = (e['siteId'] ?? e['SiteId'] ?? '').toString();
+            if (s.isNotEmpty && s != '00000000-0000-0000-0000-000000000000') {
+              siteId = s;
+            }
+          }
+          if (zoneId.isNotEmpty && siteId.isNotEmpty) break;
+        }
+      }
+
+      if (companyId.isNotEmpty && siteId.isNotEmpty && zoneId.isNotEmpty) {
+        final sysParam = widget.systemId != null && widget.systemId!.isNotEmpty
+            ? '&systemId=${widget.systemId}'
+            : '';
+        final statusUrl =
+            '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId$sysParam';
+        final statusResponse = await http.get(
+          Uri.parse(statusUrl),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Cookie': 'auth_token=$token',
+            'Content-Type': 'application/json',
+          },
+        ).timeout(const Duration(seconds: 4));
+
+        if (statusResponse.statusCode == 200 && mounted) {
+          final body = jsonDecode(statusResponse.body);
+          List<dynamic> systemsData = body['systems'] ?? [];
+
+          // If system-scoped query returned empty systems, fall back to zone-wide query
+          if (systemsData.isEmpty && sysParam.isNotEmpty) {
+            try {
+              final fallbackUrl =
+                  '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId';
+              final fallbackResp = await http.get(
+                Uri.parse(fallbackUrl),
+                headers: {
+                  'Authorization': 'Bearer $token',
+                  'Cookie': 'auth_token=$token',
+                  'Content-Type': 'application/json',
+                },
+              ).timeout(const Duration(seconds: 4));
+              if (fallbackResp.statusCode == 200) {
+                final fbBody = jsonDecode(fallbackResp.body);
+                systemsData = fbBody['systems'] ?? [];
+              }
+            } catch (_) {}
+          }
+
+          Map<String, dynamic>? activeMatch;
+
+          final eqIdTarget = _selectedEquipmentId.toLowerCase().trim();
+          final widgetEqId = (widget.equipmentId ?? '').toLowerCase().trim();
+          final imeiTarget = _activeDeviceImei.toLowerCase().trim();
+          final activeDevId = _activeDeviceId.toLowerCase().trim();
+          final widgetShortId = (widget.systemShortId ?? '').toLowerCase().trim();
+          final nameTarget = _selectedEquipmentName.toLowerCase().trim();
+          final widgetDevName = (widget.deviceName ?? '').toLowerCase().trim();
+
+          for (var sys in systemsData) {
+            final List<dynamic> eqs = sys['equipments'] ?? [];
+            for (var eq in eqs) {
+              final eqMap = Map<String, dynamic>.from(eq);
+              final eqId = (eqMap['equipmentId'] ??
+                      eqMap['EquipmentId'] ??
+                      eqMap['id'] ??
+                      eqMap['Id'] ??
+                      '')
+                  .toString()
+                  .toLowerCase()
+                  .trim();
+              final imei = (eqMap['imei'] ?? eqMap['Imei'] ?? '')
+                  .toString()
+                  .toLowerCase()
+                  .trim();
+              final shortId = (eqMap['shortId'] ?? eqMap['ShortId'] ?? '')
+                  .toString()
+                  .toLowerCase()
+                  .trim();
+              final name = (eqMap['name'] ?? eqMap['Name'] ?? '')
+                  .toString()
+                  .toLowerCase()
+                  .trim();
+
+              // Update each equipment in _equipmentsData so dropdown/indicators stay fresh
+              for (var existingEq in _equipmentsData) {
+                final exId = (existingEq['id'] ??
+                        existingEq['Id'] ??
+                        existingEq['equipmentId'] ??
+                        existingEq['EquipmentId'] ??
+                        '')
+                    .toString()
+                    .toLowerCase()
+                    .trim();
+                final exImei = (existingEq['imei'] ?? existingEq['Imei'] ?? '')
+                    .toString()
+                    .toLowerCase()
+                    .trim();
+                final exShortId = (existingEq['shortId'] ?? existingEq['ShortId'] ?? '')
+                    .toString()
+                    .toLowerCase()
+                    .trim();
+                final exName = (existingEq['name'] ?? existingEq['Name'] ?? '')
+                    .toString()
+                    .toLowerCase()
+                    .trim();
+
+                final bool matches = (exId.isNotEmpty && exId == eqId) ||
+                    (exImei.isNotEmpty && !_isPlaceholderId(exImei) && exImei == imei) ||
+                    (exShortId.isNotEmpty && !_isPlaceholderId(exShortId) && exShortId == shortId) ||
+                    (exName.isNotEmpty && exName == name);
+
+                if (matches) {
+                  if (imei.isNotEmpty && !_isPlaceholderId(imei)) {
+                    existingEq['imei'] = eqMap['imei'];
+                  }
+                  final statusStr = (eqMap['status'] ??
+                          eqMap['Status'] ??
+                          'DISCONNECTED')
+                      .toString()
+                      .toUpperCase()
+                      .trim();
+                  final bool isOnline = statusStr == 'ON' ||
+                      statusStr == 'OFF' ||
+                      statusStr == 'ONLINE' ||
+                      statusStr == 'CONNECTED' ||
+                      statusStr == 'ACTIVE';
+                  existingEq['onOffStatus'] = {
+                    'isOnline': isOnline,
+                    'status': statusStr,
+                  };
+                  existingEq['isOnline'] = isOnline;
+                  existingEq['isActive'] = isOnline;
+                  if (eqMap['setTemp'] != null) {
+                    existingEq['setTemp'] = eqMap['setTemp'];
+                  }
+                  if (eqMap['currentTemp'] != null) {
+                    existingEq['currentTemp'] = eqMap['currentTemp'];
+                  }
+                  if (eqMap['hum'] != null) {
+                    existingEq['humidity'] = eqMap['hum'];
+                  }
+                }
+              }
+
+              // Check if this equipment matches the currently active selection
+              // 1. By Equipment ID
+              if (eqId.isNotEmpty) {
+                if ((eqIdTarget.isNotEmpty && eqId == eqIdTarget) ||
+                    (widgetEqId.isNotEmpty && eqId == widgetEqId)) {
+                  activeMatch = eqMap;
+                  break;
+                }
+              }
+
+              // 2. By Hardware IMEI
+              if (imei.isNotEmpty && !_isPlaceholderId(imei)) {
+                if ((imeiTarget.isNotEmpty && !_isPlaceholderId(imeiTarget) && imei == imeiTarget) ||
+                    (activeDevId.isNotEmpty && !_isPlaceholderId(activeDevId) && imei == activeDevId) ||
+                    (widgetShortId.isNotEmpty && !_isPlaceholderId(widgetShortId) && imei == widgetShortId)) {
+                  activeMatch = eqMap;
+                  continue;
+                }
+              }
+
+              // 3. By Short ID
+              if (shortId.isNotEmpty && !_isPlaceholderId(shortId)) {
+                if ((imeiTarget.isNotEmpty && !_isPlaceholderId(imeiTarget) && shortId == imeiTarget) ||
+                    (activeDevId.isNotEmpty && !_isPlaceholderId(activeDevId) && shortId == activeDevId) ||
+                    (widgetShortId.isNotEmpty && !_isPlaceholderId(widgetShortId) && shortId == widgetShortId)) {
+                  activeMatch = eqMap;
+                  continue;
+                }
+              }
+
+              // 4. By Equipment Name
+              if (name.isNotEmpty) {
+                final cleanName = name.replaceAll('_', '').replaceAll('-', '').replaceAll(' ', '');
+                final cleanTarget = nameTarget.replaceAll('_', '').replaceAll('-', '').replaceAll(' ', '');
+                final cleanWidgetName = widgetDevName.replaceAll('_', '').replaceAll('-', '').replaceAll(' ', '');
+                if (name == nameTarget ||
+                    (cleanTarget.isNotEmpty && cleanName == cleanTarget) ||
+                    (cleanWidgetName.isNotEmpty && cleanName == cleanWidgetName)) {
+                  activeMatch = eqMap;
+                  continue;
+                }
+              }
+            }
+          }
+
+          // Fallback: If only 1 equipment exists in the returned API system, match it
+          if (activeMatch == null && systemsData.isNotEmpty) {
+            final List<dynamic> firstEqs = systemsData.first['equipments'] ?? [];
+            if (firstEqs.length == 1) {
+              activeMatch = Map<String, dynamic>.from(firstEqs.first);
+            }
+          }
+
+          if (activeMatch != null && mounted) {
+            final statusStr = (activeMatch['status'] ??
+                    activeMatch['Status'] ??
+                    'DISCONNECTED')
+                .toString()
+                .toUpperCase()
+                .trim();
+            final bool isOnline = statusStr == 'ON' ||
+                statusStr == 'OFF' ||
+                statusStr == 'ONLINE' ||
+                statusStr == 'CONNECTED' ||
+                statusStr == 'ACTIVE';
+
+            final String eqKey = _selectedEquipmentId.isNotEmpty
+                ? _selectedEquipmentId
+                : _effectiveDeviceId;
+            final isLockActive = _lastPowerToggleTime != null &&
+                DateTime.now().difference(_lastPowerToggleTime!).inSeconds < 10;
+            final isTempLockActive = _lastUserTempChangeTime != null &&
+                DateTime.now().difference(_lastUserTempChangeTime!).inSeconds < 8;
+
+            final activeImeiVal = (activeMatch['imei'] ?? activeMatch['Imei'] ?? '')
+                .toString()
+                .trim();
+            if (activeImeiVal.isNotEmpty && !_isPlaceholderId(activeImeiVal) && _activeDeviceImei != activeImeiVal) {
+              _activeDeviceImei = activeImeiVal;
+              _activeDeviceId = activeImeiVal;
+              _mqtt.setDeviceId(activeImeiVal, imei: activeImeiVal);
+            }
+
+            setState(() {
+              _isActive = isOnline;
+
+              if (!isLockActive && !_pendingPower) {
+                if (statusStr == 'ON') {
+                  _isPowerOn = true;
+                  _fanRotationCtrl.repeat();
+                } else if (statusStr == 'OFF') {
+                  _isPowerOn = false;
+                  _fanRotationCtrl.stop();
+                }
+              } else {
+                // If API status already confirms the optimistic user power command, release the lock early!
+                if ((statusStr == 'ON' && _isPowerOn) || (statusStr == 'OFF' && !_isPowerOn)) {
+                  _pendingPower = false;
+                  _lastPowerToggleTime = null;
+                  if (eqKey.isNotEmpty) {
+                    _equipmentPowerToggleTimes.remove(eqKey);
+                    _equipmentPendingPower[eqKey] = false;
+                  }
+                }
+              }
+
+              if (!isTempLockActive &&
+                  !_pendingTemp &&
+                  activeMatch!['setTemp'] != null) {
+                final sTemp =
+                    int.tryParse(activeMatch['setTemp'].toString());
+                if (sTemp != null && sTemp >= 16 && sTemp <= 30) {
+                  _setTemp = sTemp;
+                }
+              } else if (activeMatch!['setTemp'] != null) {
+                final sTemp = int.tryParse(activeMatch['setTemp'].toString());
+                if (sTemp != null && sTemp == _setTemp) {
+                  _pendingTemp = false;
+                  _userTempOverride = false;
+                  if (eqKey.isNotEmpty) {
+                    _equipmentUserTempOverrides[eqKey] = false;
+                  }
+                }
+              }
+
+              if (activeMatch['currentTemp'] != null) {
+                final cTemp = (activeMatch['currentTemp'] as num?)?.toInt() ??
+                    int.tryParse(activeMatch['currentTemp'].toString());
+                if (cTemp != null && cTemp > 0) _currentTemp = cTemp;
+              }
+              if (activeMatch['hum'] != null) {
+                final h = (activeMatch['hum'] as num?)?.round() ??
+                    int.tryParse(activeMatch['hum'].toString());
+                if (h != null && h > 0) _humidity = h;
+              }
+            });
+
+            debugPrint(
+                '📡 [API] Updated live status via API: online=$_isActive, power=$_isPowerOn, setTemp=$_setTemp, curTemp=$_currentTemp, imei=$_activeDeviceImei');
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ [API] Error fetching live status via API: $e');
+    }
   }
 
   Future<void> _loadAutoTemp() async {
@@ -409,6 +793,10 @@ class _ACControlPageState extends State<ACControlPage>
     final bool localAuto = prefs.getBool('auto_enabled') ?? false;
     _autoTemp = prefs.getInt('auto_temp') ?? 22;
 
+    final String eqKeyInit = _selectedEquipmentId.isNotEmpty ? _selectedEquipmentId : _effectiveDeviceId;
+    final bool? savedPower = prefs.getBool('ac_power_$eqKeyInit') ??
+        prefs.getBool('ac_power_$_effectiveDeviceId');
+
     // Load initial values from the last known state of this device if available
     final initial = _mqtt.getLastStateFor(_activeDeviceId) ??
         (_activeDeviceImei.isNotEmpty
@@ -423,13 +811,11 @@ class _ACControlPageState extends State<ACControlPage>
             .toString()
             .toLowerCase();
         final imei = (e['imei'] ?? e['Imei'] ?? '').toString().toLowerCase();
-        final sId =
-            (e['shortId'] ?? e['ShortId'] ?? '').toString().toLowerCase();
         final activeLower = _activeDeviceId.toLowerCase();
         final imeiLower = _activeDeviceImei.toLowerCase();
         final selectedLower = _selectedEquipmentId.toLowerCase();
         return (selectedLower.isNotEmpty && id == selectedLower) ||
-            (activeLower.isNotEmpty && (imei == activeLower || sId == activeLower)) ||
+            (activeLower.isNotEmpty && imei == activeLower) ||
             (imeiLower.isNotEmpty && imei == imeiLower);
       });
     } catch (_) {}
@@ -456,10 +842,22 @@ class _ACControlPageState extends State<ACControlPage>
         _startHeartbeatTimer();
       } else {
         _heartbeatTimer?.cancel();
-        _isPowerOn = false;
-        _fanRotationCtrl.stop();
       }
-      _isPowerOn = initial.isPowerOn;
+      if (savedPower != null) {
+        _isPowerOn = savedPower;
+        if (_isPowerOn) {
+          _fanRotationCtrl.repeat();
+        } else {
+          _fanRotationCtrl.stop();
+        }
+      } else {
+        _isPowerOn = initial.isPowerOn;
+        if (_isPowerOn) {
+          _fanRotationCtrl.repeat();
+        } else {
+          _fanRotationCtrl.stop();
+        }
+      }
       if (initial.setTemp >= 16 && initial.setTemp <= 30) {
         _setTemp = initial.setTemp;
       }
@@ -511,12 +909,17 @@ class _ACControlPageState extends State<ACControlPage>
         } else if (statusVal == 'OFF') {
           _isPowerOn = false;
           _fanRotationCtrl.stop();
+        } else if (savedPower != null) {
+          _isPowerOn = savedPower;
+          if (_isPowerOn) {
+            _fanRotationCtrl.repeat();
+          } else {
+            _fanRotationCtrl.stop();
+          }
         }
       }
       if (!_isActive) {
         _heartbeatTimer?.cancel();
-        _isPowerOn = false;
-        _fanRotationCtrl.stop();
       }
     }
 
@@ -553,10 +956,11 @@ class _ACControlPageState extends State<ACControlPage>
           }
         }
 
-        // Dynamically bind to the physical device ID only if active device is unset or fallback.
+        // Dynamically bind to the physical device ID only if active device and selected equipment are unset.
         final fallbackId = AppConfig.mqttDeviceId.toLowerCase();
-        if (_activeDeviceId.isEmpty ||
-            _activeDeviceId.toLowerCase() == fallbackId) {
+        if (_selectedEquipmentId.isEmpty &&
+            (_activeDeviceId.isEmpty ||
+                _activeDeviceId.toLowerCase() == fallbackId)) {
           if (state.deviceId.isNotEmpty &&
               state.deviceId.toLowerCase() != fallbackId) {
             debugPrint(
@@ -567,20 +971,49 @@ class _ACControlPageState extends State<ACControlPage>
         }
 
         // Power sync lock: ignore incoming telemetry power state
-        // if we are waiting for an ACK (_pendingPower) or if we just toggled
-        // the power in the last 6 seconds (to avoid UI reversion lag).
+        // if we are waiting for an ACK (_pendingPower) or if the user explicitly commanded the state
+        // (to avoid UI reversion lag from open-loop IR blaster telemetry which reports static OFF).
+        final String eqKey = _selectedEquipmentId.isNotEmpty
+            ? _selectedEquipmentId
+            : _effectiveDeviceId;
+        _lastPowerToggleTime = _equipmentPowerToggleTimes[eqKey];
+        _pendingPower = _equipmentPendingPower[eqKey] ?? false;
+
         final secondsSinceToggle = _lastPowerToggleTime == null
             ? 100
             : DateTime.now().difference(_lastPowerToggleTime!).inSeconds;
 
-        if (!_pendingPower && secondsSinceToggle >= 6) {
-          _isPowerOn = state.isPowerOn;
+        // Auto-expire power toggle lock after 12 seconds so stale lock never blocks real state forever
+        if (secondsSinceToggle >= 12) {
+          _lastPowerToggleTime = null;
+          _equipmentPowerToggleTimes.remove(eqKey);
           _pendingPower = false;
-        } else if (secondsSinceToggle >= 6) {
+          _equipmentPendingPower[eqKey] = false;
+        }
+
+        if (_pendingPower || _lastPowerToggleTime != null) {
+          // If incoming hardware telemetry matches our intended optimistic state, release the pending lock!
+          if (state.isPowerOn == _isPowerOn) {
+            _pendingPower = false;
+            _equipmentPendingPower[eqKey] = false;
+          }
+          // Retain the user's commanded power state and do not allow open-loop telemetry to revert it.
+        } else {
+          // Only adopt hardware power state if hardware explicitly reports ON.
+          // Open-loop IR blaster telemetry reporting static 'OFF' must NEVER turn off
+          // an AC that the user explicitly commanded ON!
+          if (state.isPowerOn) {
+            _isPowerOn = true;
+            if (mounted) _fanRotationCtrl.repeat();
+          }
           _pendingPower = false;
+          _equipmentPendingPower[eqKey] = false;
         }
 
         // Temperature sync logic:
+        _lastUserTempChangeTime = _equipmentUserTempTimes[eqKey];
+        _userTempOverride = _equipmentUserTempOverrides[eqKey] ?? false;
+
         final secondsSinceTempChange = _lastUserTempChangeTime == null
             ? 100
             : DateTime.now().difference(_lastUserTempChangeTime!).inSeconds;
@@ -589,6 +1022,7 @@ class _ACControlPageState extends State<ACControlPage>
           // While user override / lock window is active, protect against duplicate or stale MQTT packets
           if (state.setTemp == _setTemp && secondsSinceTempChange >= 4) {
             _userTempOverride = false;
+            _equipmentUserTempOverrides[eqKey] = false;
           }
         } else {
           // Sync UI temperature to the actual set temperature reported by the physical device / API
@@ -711,6 +1145,7 @@ class _ACControlPageState extends State<ACControlPage>
           _fanRotationCtrl.repeat();
         });
         _showSnack('AC turned ON', AppColors.online);
+        _fetchStatusViaApi();
       } else if (resp.type == SirisResponseType.acOffDone) {
         setState(() {
           _isPowerOn = false;
@@ -718,6 +1153,7 @@ class _ACControlPageState extends State<ACControlPage>
           _fanRotationCtrl.stop();
         });
         _showSnack('AC turned OFF', AppColors.offline);
+        _fetchStatusViaApi();
       } else if (resp.type == SirisResponseType.tempSet) {
         final secondsSinceTempChange = _lastUserTempChangeTime == null
             ? 100
@@ -733,6 +1169,7 @@ class _ACControlPageState extends State<ACControlPage>
         setState(() => _pendingTemp = false);
         _showSnack('Temperature set to ${resp.detail ?? _setTemp}°C',
             AppColors.coolBlue);
+        _fetchStatusViaApi();
       } else if (resp.type == SirisResponseType.tempError) {
         setState(() => _pendingTemp = false);
         _showSnack('Temperature error: ${resp.detail}', AppColors.offline);
@@ -753,6 +1190,7 @@ class _ACControlPageState extends State<ACControlPage>
         });
         _showSnack('Automation turned ${resp.detail}',
             isAuto ? AppColors.online : AppColors.offline);
+        _fetchStatusViaApi();
       } else if (resp.type == SirisResponseType.automateError) {
         _showSnack('Automation error: ${resp.detail}', AppColors.offline);
       } else if (resp.type == SirisResponseType.wifiPrimarySet) {
@@ -812,9 +1250,14 @@ class _ACControlPageState extends State<ACControlPage>
       }
     });
 
+    final String resolvedCompanyId = (widget.companyId != null && widget.companyId!.isNotEmpty)
+        ? widget.companyId!
+        : (await AuthService.getCompanyId() ?? '');
+
     final connected = await _mqtt.connect(
       deviceId: _activeDeviceId,
       imei: _activeDeviceImei,
+      companyId: resolvedCompanyId.isNotEmpty ? resolvedCompanyId : null,
     );
     if (mounted) setState(() => _isConnected = connected);
   }
@@ -823,7 +1266,7 @@ class _ACControlPageState extends State<ACControlPage>
     if (widget.systemId == null) {
       // Standalone mode - use default device ID
       setState(() {
-        _activeDeviceId = widget.systemShortId ?? AppConfig.mqttDeviceId;
+        _activeDeviceId = AppConfig.mqttDeviceId;
         _activeDeviceImei = '';
         _selectedEquipmentName = widget.deviceName ?? 'AC Remote';
       });
@@ -834,29 +1277,26 @@ class _ACControlPageState extends State<ACControlPage>
     setState(() => _isLoadingEquipments = true);
 
     List<Map<String, dynamic>> allEquips = [];
-    bool fetchSuccess = false;
 
-    // 1. Try fetching from remote database
+    final companyId = widget.companyId ?? await AuthService.getCompanyId() ?? '';
+    final siteId = await AuthService.getSiteId() ?? '';
+    final token = await AuthService.getCookieHeader() ?? '';
+    String zoneId = await AuthService.getZoneId() ?? '';
+
+    // Dynamically retrieve MQTT configuration exclusively via API
+    if (companyId.isNotEmpty) {
+      await MqttConfigService.fetchMqttConfig(companyId: companyId, type: 'ac');
+    }
+
+    // 1. Fetch equipments for this system directly via GET /systems/equipment/${widget.systemId}
     try {
-      final companyId = await AuthService.getCompanyId() ?? '';
-      final siteId = await AuthService.getSiteId() ?? '';
-      final token = await AuthService.getCookieHeader() ?? '';
-
-      final queryParams = <String>[];
-      if (companyId.isNotEmpty &&
-          companyId != 'null' &&
-          companyId != 'undefined') {
-        queryParams.add('companyId=$companyId');
-      }
-      if (siteId.isNotEmpty && siteId != 'null' && siteId != 'undefined') {
-        queryParams.add('siteId=$siteId');
-      }
-      final queryString =
-          queryParams.isNotEmpty ? '?${queryParams.join('&')}' : '';
-      final url = '${AppConfig.provisionBaseUrl}/equipments$queryString';
+      final sysEqUrl =
+          '${AppConfig.provisionBaseUrl}/systems/equipment/${widget.systemId}'
+          '?companyId=$companyId&siteId=$siteId';
+      debugPrint('🌐 [ACControl] Fetching equipments for system: $sysEqUrl');
 
       final response = await http.get(
-        Uri.parse(url),
+        Uri.parse(sysEqUrl),
         headers: {
           'Authorization': 'Bearer $token',
           'Cookie': 'auth_token=$token',
@@ -868,106 +1308,37 @@ class _ACControlPageState extends State<ACControlPage>
         final data = jsonDecode(response.body);
         final dynamic listData = data['data'];
         if (listData != null && listData is List) {
-          allEquips =
-              listData.map((e) => Map<String, dynamic>.from(e)).toList();
-          fetchSuccess = true;
+          allEquips = listData.map((e) => Map<String, dynamic>.from(e)).toList();
+          debugPrint('✅ [ACControl] Successfully retrieved ${allEquips.length} equipments for system ${widget.systemId}');
         }
       } else {
-        debugPrint(
-            'Equipment API returned HTTP ${response.statusCode}: ${response.body}');
+        debugPrint('⚠️ [ACControl] System equipment API returned HTTP ${response.statusCode}: ${response.body}');
       }
     } catch (e) {
-      debugPrint('Error fetching equipments from server: $e');
+      debugPrint('⚠️ [ACControl] Error fetching system equipment: $e');
     }
 
-    if (!fetchSuccess && widget.systemId != null) {
-      debugPrint(
-          '🔄 Falling back to systems/equipment endpoint for system: ${widget.systemId}');
-      try {
-        final companyId = await AuthService.getCompanyId() ?? '';
-        final siteId = await AuthService.getSiteId() ?? '';
-        final token = await AuthService.getCookieHeader() ?? '';
-
-        final fallbackUrl =
-            '${AppConfig.provisionBaseUrl}/systems/equipment/${widget.systemId}'
-            '?companyId=$companyId&siteId=$siteId';
-
-        final response = await http.get(
-          Uri.parse(fallbackUrl),
-          headers: {
-            'Authorization': 'Bearer $token',
-            'Cookie': 'auth_token=$token',
-            'Content-Type': 'application/json',
-          },
-        ).timeout(const Duration(seconds: 4));
-
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body);
-          final dynamic listData = data['data'];
-          if (listData != null && listData is List) {
-            allEquips =
-                listData.map((e) => Map<String, dynamic>.from(e)).toList();
-            fetchSuccess = true;
-            debugPrint(
-                '✅ Fallback successfully retrieved ${allEquips.length} equipments');
-          }
-        } else {
-          debugPrint(
-              'Fallback equipments API returned HTTP ${response.statusCode}: ${response.body}');
+    // Resolve zoneId from allEquips if not yet set
+    if (zoneId.isEmpty && allEquips.isNotEmpty) {
+      for (var e in allEquips) {
+        final z = (e['zoneId'] ?? e['ZoneId'] ?? '').toString();
+        if (z.isNotEmpty && z != '00000000-0000-0000-0000-000000000000') {
+          zoneId = z;
+          break;
         }
-      } catch (e) {
-        debugPrint('Error in fallback equipments fetch: $e');
       }
     }
 
-    // 2. Always load and merge locally provisioned devices
+    // 2. Fetch live equipment status & IMEIs from /mqtt/ac/status for this system
+    final Map<String, Map<String, dynamic>> statusByEquipmentId = {};
+    final Map<String, Map<String, dynamic>> statusByDevId = {};
+
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final localDevicesJson =
-          prefs.getString('local_provisioned_devices') ?? '[]';
-      final List<dynamic> localList = jsonDecode(localDevicesJson);
-      for (var localDev in localList) {
-        final localMap = Map<String, dynamic>.from(localDev);
-        final String localId = (localMap['id'] ?? '').toString();
-        final exists = allEquips.any((e) {
-          final eId =
-              (e['id'] ?? e['Id'] ?? e['equipmentId'] ?? e['EquipmentId'] ?? '')
-                  .toString();
-          final eShortId = (e['shortId'] ?? e['ShortId'] ?? '').toString();
-          return eId == localId || eShortId == localMap['shortId'];
-        });
-        if (!exists) {
-          allEquips.add(localMap);
-        }
-      }
-    } catch (e) {
-      debugPrint('Error loading local devices in ACControlPage: $e');
-    }
-
-    // 3. Filter equipments by systemId
-    final List<Map<String, dynamic>> filteredList = allEquips.where((e) {
-      final sysId = (e['systemId'] ?? e['SystemId'] ?? '').toString();
-      return sysId.toLowerCase() == widget.systemId!.toLowerCase();
-    }).toList();
-
-    // 4. Fetch live AC statuses from /mqtt/ac/status (matching system_view.dart)
-    try {
-      final companyId = await AuthService.getCompanyId() ?? '';
-      final siteId = await AuthService.getSiteId() ?? '';
-      final token = await AuthService.getCookieHeader() ?? '';
-      String zoneId = await AuthService.getZoneId() ?? '';
-      if (zoneId.isEmpty) {
-        for (var e in allEquips) {
-          final z = (e['zoneId'] ?? e['ZoneId'] ?? '').toString();
-          if (z.isNotEmpty && z != '00000000-0000-0000-0000-000000000000') {
-            zoneId = z;
-            break;
-          }
-        }
-      }
       if (companyId.isNotEmpty && siteId.isNotEmpty && zoneId.isNotEmpty) {
         final statusUrl =
-            '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId';
+            '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId&systemId=${widget.systemId}';
+        debugPrint('🌐 [ACControl] Fetching system AC statuses: $statusUrl');
+
         final statusResponse = await http.get(
           Uri.parse(statusUrl),
           headers: {
@@ -980,101 +1351,19 @@ class _ACControlPageState extends State<ACControlPage>
         if (statusResponse.statusCode == 200) {
           final body = jsonDecode(statusResponse.body);
           final List<dynamic> systemsData = body['systems'] ?? [];
-          final Map<String, Map<String, dynamic>> statusByEquipmentId = {};
-          final Map<String, Map<String, dynamic>> statusByDevId = {};
-
           for (var sys in systemsData) {
             final List<dynamic> eqs = sys['equipments'] ?? [];
             for (var eq in eqs) {
               final eqMap = Map<String, dynamic>.from(eq);
-              final eqId = (eq['equipmentId'] ??
-                      eq['EquipmentId'] ??
-                      eq['id'] ??
-                      eq['Id'] ??
-                      '')
-                  .toString()
-                  .toLowerCase()
-                  .trim();
-              final sId = (eq['shortId'] ?? eq['ShortId'] ?? '')
-                  .toString()
-                  .toLowerCase()
-                  .trim();
-              final imei = (eq['imei'] ?? eq['Imei'] ?? '')
-                  .toString()
-                  .toLowerCase()
-                  .trim();
-              final name = (eq['name'] ?? eq['Name'] ?? '')
-                  .toString()
-                  .toLowerCase()
-                  .trim();
+              final eqId = (eqMap['equipmentId'] ?? eqMap['EquipmentId'] ?? eqMap['id'] ?? eqMap['Id'] ?? '').toString().toLowerCase().trim();
+              final imei = (eqMap['imei'] ?? eqMap['Imei'] ?? '').toString().toLowerCase().trim();
+              final name = (eqMap['name'] ?? eqMap['Name'] ?? '').toString().toLowerCase().trim();
+              final shortId = (eqMap['shortId'] ?? eqMap['ShortId'] ?? '').toString().toLowerCase().trim();
 
               if (eqId.isNotEmpty) statusByEquipmentId[eqId] = eqMap;
-              if (sId.isNotEmpty) statusByDevId[sId] = eqMap;
-              if (imei.isNotEmpty) statusByDevId[imei] = eqMap;
+              if (imei.isNotEmpty && !_isPlaceholderId(imei)) statusByDevId[imei] = eqMap;
+              if (shortId.isNotEmpty && !_isPlaceholderId(shortId)) statusByDevId[shortId] = eqMap;
               if (name.isNotEmpty) statusByDevId[name] = eqMap;
-            }
-          }
-
-          for (var eq in filteredList) {
-            final eqId = (eq['id'] ??
-                    eq['Id'] ??
-                    eq['equipmentId'] ??
-                    eq['EquipmentId'] ??
-                    '')
-                .toString()
-                .toLowerCase()
-                .trim();
-            final sId = (eq['shortId'] ?? eq['ShortId'] ?? '')
-                .toString()
-                .toLowerCase()
-                .trim();
-            final imei = (eq['imei'] ?? eq['Imei'] ?? '')
-                .toString()
-                .toLowerCase()
-                .trim();
-            final name = (eq['name'] ?? eq['Name'] ?? '')
-                .toString()
-                .toLowerCase()
-                .trim();
-
-            final liveInfo = statusByEquipmentId[eqId] ??
-                (sId.isNotEmpty ? statusByDevId[sId] : null) ??
-                (imei.isNotEmpty ? statusByDevId[imei] : null) ??
-                (name.isNotEmpty ? statusByDevId[name] : null);
-
-            if (liveInfo != null) {
-              final statusStr =
-                  (liveInfo['status'] ?? liveInfo['Status'] ?? 'DISCONNECTED')
-                      .toString()
-                      .toUpperCase()
-                      .trim();
-              final bool isOnline = statusStr == 'ON' ||
-                  statusStr == 'OFF' ||
-                  statusStr == 'ONLINE' ||
-                  statusStr == 'CONNECTED' ||
-                  statusStr == 'ACTIVE';
-              eq['onOffStatus'] = {
-                'isOnline': isOnline,
-                'status': statusStr,
-              };
-              eq['isOnline'] = isOnline;
-              eq['isActive'] = isOnline;
-              if (liveInfo['setTemp'] != null) {
-                eq['setTemp'] = liveInfo['setTemp'];
-              }
-              if (liveInfo['currentTemp'] != null) {
-                eq['currentTemp'] = liveInfo['currentTemp'];
-              }
-              if (liveInfo['hum'] != null) {
-                eq['humidity'] = liveInfo['hum'];
-              }
-            } else {
-              eq['onOffStatus'] = {
-                'isOnline': false,
-                'status': 'DISCONNECTED',
-              };
-              eq['isOnline'] = false;
-              eq['isActive'] = false;
             }
           }
         }
@@ -1083,64 +1372,207 @@ class _ACControlPageState extends State<ACControlPage>
       debugPrint('⚠️ [ACControl] Live status fetch error: $e');
     }
 
+    // 3. Fallback: If systems/equipment endpoint returned nothing, try statusByEquipmentId or local devices
+    if (allEquips.isEmpty) {
+      if (statusByEquipmentId.isNotEmpty) {
+        allEquips = statusByEquipmentId.values.map((e) => Map<String, dynamic>.from(e)).toList();
+      } else {
+        // Try local devices as a last resort
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final localDevicesJson = prefs.getString('local_provisioned_devices') ?? '[]';
+          final List<dynamic> localList = jsonDecode(localDevicesJson);
+          for (var localDev in localList) {
+            final localMap = Map<String, dynamic>.from(localDev);
+            final sysId = (localMap['systemId'] ?? localMap['SystemId'] ?? '').toString();
+            if (sysId.toLowerCase() == widget.systemId!.toLowerCase()) {
+              allEquips.add(localMap);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 4. Enrich allEquips with live data (hardware IMEI, status, setTemp, currentTemp, humidity)
+    for (var eq in allEquips) {
+      final eqId = (eq['id'] ?? eq['Id'] ?? eq['equipmentId'] ?? eq['EquipmentId'] ?? '').toString().toLowerCase().trim();
+      final currentImei = (eq['imei'] ?? eq['Imei'] ?? '').toString().trim();
+      final shortId = (eq['shortId'] ?? eq['ShortId'] ?? '').toString().toLowerCase().trim();
+      final name = (eq['name'] ?? eq['Name'] ?? '').toString().toLowerCase().trim();
+
+      final liveInfo = statusByEquipmentId[eqId] ??
+          (currentImei.isNotEmpty && !_isPlaceholderId(currentImei) ? statusByDevId[currentImei.toLowerCase()] : null) ??
+          (shortId.isNotEmpty && !_isPlaceholderId(shortId) ? statusByDevId[shortId] : null) ??
+          (name.isNotEmpty ? statusByDevId[name] : null);
+
+      if (liveInfo != null) {
+        final liveImei = (liveInfo['imei'] ?? liveInfo['Imei'] ?? '').toString().trim();
+        if (liveImei.isNotEmpty && !_isPlaceholderId(liveImei)) {
+          eq['imei'] = liveImei;
+        }
+        final statusStr = (liveInfo['status'] ?? liveInfo['Status'] ?? 'DISCONNECTED').toString().toUpperCase().trim();
+        final bool isOnline = statusStr == 'ON' || statusStr == 'OFF' || statusStr == 'ONLINE' || statusStr == 'CONNECTED' || statusStr == 'ACTIVE';
+        eq['onOffStatus'] = {
+          'isOnline': isOnline,
+          'status': statusStr,
+        };
+        eq['isOnline'] = isOnline;
+        eq['isActive'] = isOnline;
+        if (liveInfo['setTemp'] != null) {
+          eq['setTemp'] = liveInfo['setTemp'];
+        }
+        if (liveInfo['currentTemp'] != null) {
+          eq['currentTemp'] = liveInfo['currentTemp'];
+        }
+        if (liveInfo['hum'] != null) {
+          eq['humidity'] = liveInfo['hum'];
+        }
+      }
+
+      // If IMEI is still missing or placeholder, fetch individual equipment detail
+      final finalImei = (eq['imei'] ?? eq['Imei'] ?? '').toString().trim();
+      if ((finalImei.isEmpty || _isPlaceholderId(finalImei)) && eqId.isNotEmpty) {
+        final fetchedImei = await _fetchEquipmentImei(eqId);
+        if (fetchedImei.isNotEmpty && !_isPlaceholderId(fetchedImei)) {
+          eq['imei'] = fetchedImei;
+        }
+      }
+    }
+
+    final List<Map<String, dynamic>> filteredList = allEquips;
+
     if (mounted && filteredList.isNotEmpty) {
       setState(() {
         _equipmentsData = List<Map<String, dynamic>>.from(filteredList);
         _isLoadingEquipments = false;
       });
-      // Find matching equipment based on passed name or short ID, or fallback to first
-      Map<String, dynamic> selected = filteredList.first;
-      if (widget.deviceName != null || widget.systemShortId != null) {
-        for (var eq in filteredList) {
-          final eqName = (eq['name'] ?? eq['Name'] ?? '').toString();
-          final eqShortId =
-              (eq['shortId'] ?? eq['ShortId'] ?? eq['equipmentShortId'] ?? '')
-                  .toString();
-          final eqId = (eq['id'] ??
-                  eq['Id'] ??
-                  eq['equipmentId'] ??
-                  eq['EquipmentId'] ??
-                  '')
-              .toString();
-          final eqImei = (eq['imei'] ?? eq['Imei'] ?? '').toString();
 
-          if ((widget.deviceName != null &&
-                  eqName.toLowerCase() == widget.deviceName!.toLowerCase()) ||
-              (widget.systemShortId != null &&
-                  eqShortId.toLowerCase() ==
-                      widget.systemShortId!.toLowerCase()) ||
-              (widget.systemShortId != null &&
-                  eqImei.toLowerCase() ==
-                      widget.systemShortId!.toLowerCase()) ||
-              (widget.systemShortId != null &&
-                  eqId.toLowerCase() == widget.systemShortId!.toLowerCase())) {
-            selected = eq;
+      // Find matching equipment
+      Map<String, dynamic>? currentMatch;
+
+      // 1. By passed widget.equipmentId
+      if (widget.equipmentId != null && widget.equipmentId!.isNotEmpty) {
+        for (var eq in filteredList) {
+          final eqId = (eq['id'] ?? eq['Id'] ?? eq['equipmentId'] ?? eq['EquipmentId'] ?? '').toString();
+          if (eqId.toLowerCase() == widget.equipmentId!.toLowerCase()) {
+            currentMatch = eq;
             break;
           }
         }
       }
-      await _onEquipmentSelected(
-        (selected['id'] ??
-                selected['Id'] ??
-                selected['equipmentId'] ??
-                selected['EquipmentId'] ??
-                '')
-            .toString(),
-        selected['name']?.toString() ?? 'AC Unit',
-        (selected['imei'] ??
+
+      // 2. By selected equipment ID if already set
+      if (currentMatch == null && _selectedEquipmentId.isNotEmpty) {
+        for (var eq in filteredList) {
+          final eqId = (eq['id'] ?? eq['Id'] ?? eq['equipmentId'] ?? eq['EquipmentId'] ?? '').toString();
+          if (eqId.toLowerCase() == _selectedEquipmentId.toLowerCase()) {
+            currentMatch = eq;
+            break;
+          }
+        }
+      }
+
+      // 3. By active hardware IMEI
+      if (currentMatch == null) {
+        final targetImei = _activeDeviceImei.isNotEmpty
+            ? _activeDeviceImei
+            : ((widget.systemShortId != null && !_isPlaceholderId(widget.systemShortId))
+                ? widget.systemShortId!
+                : '');
+        if (targetImei.isNotEmpty) {
+          for (var eq in filteredList) {
+            final eqImei = (eq['imei'] ?? eq['Imei'] ?? eq['deviceId'] ?? eq['DeviceId'] ?? '').toString();
+            if (eqImei.toLowerCase() == targetImei.toLowerCase()) {
+              currentMatch = eq;
+              break;
+            }
+          }
+        }
+      }
+
+      // 4. Default to first equipment
+      Map<String, dynamic> selected = currentMatch ?? filteredList.first;
+      final selectedId = (selected['id'] ??
+              selected['Id'] ??
+              selected['equipmentId'] ??
+              selected['EquipmentId'] ??
+              '')
+          .toString();
+
+      // If we are already looking at this equipment, update live telemetry & power
+      if (_selectedEquipmentId.isNotEmpty && _selectedEquipmentId == selectedId) {
+        final eqImei = (selected['imei'] ??
                 selected['Imei'] ??
-                selected['shortId'] ??
-                selected['ShortId'] ??
-                '')
-            .toString(),
+                selected['deviceId'] ??
+                selected['DeviceId'] ??
+                selected['device_id'])
+            ?.toString()
+            .trim();
+        if (eqImei != null && eqImei.isNotEmpty && !_isPlaceholderId(eqImei)) {
+          _activeDeviceImei = eqImei;
+          _activeDeviceId = eqImei;
+          _mqtt.setDeviceId(eqImei, imei: eqImei);
+        }
+        if (selected['name'] != null && selected['name'].toString().isNotEmpty) {
+          _selectedEquipmentName = selected['name'].toString();
+        }
+        final statusVal = selected['onOffStatus'] is Map
+            ? selected['onOffStatus']['status']?.toString().toUpperCase()
+            : selected['status']?.toString().toUpperCase();
+        if (mounted) {
+          setState(() {
+            _isActive = selected['isOnline'] == true ||
+                selected['isActive'] == true ||
+                statusVal == 'ON' ||
+                statusVal == 'OFF' ||
+                statusVal == 'ACTIVE';
+
+            if (_lastPowerToggleTime == null && !_pendingPower) {
+              if (statusVal == 'ON') {
+                _isPowerOn = true;
+                _fanRotationCtrl.repeat();
+              } else if (statusVal == 'OFF') {
+                _isPowerOn = false;
+                _fanRotationCtrl.stop();
+              }
+            }
+
+            if (selected['setTemp'] != null && !_userTempOverride) {
+              final sTemp = int.tryParse(selected['setTemp'].toString());
+              if (sTemp != null && sTemp >= 16 && sTemp <= 30) {
+                _setTemp = sTemp;
+              }
+            }
+            if (selected['currentTemp'] != null) {
+              final cTemp = (selected['currentTemp'] as num?)?.toInt() ??
+                  int.tryParse(selected['currentTemp'].toString());
+              if (cTemp != null && cTemp > 0) _currentTemp = cTemp;
+            }
+            if (selected['humidity'] != null) {
+              final h = (selected['humidity'] as num?)?.round() ??
+                  int.tryParse(selected['humidity'].toString());
+              if (h != null && h > 0) _humidity = h;
+            }
+          });
+        }
+        _fetchStatusViaApi();
+        return;
+      }
+
+      await _onEquipmentSelected(
+        selectedId,
+        selected['name']?.toString() ?? 'AC Unit',
       );
+      _fetchStatusViaApi();
       return;
     }
 
     // Fallback if anything fails and list is empty
     if (mounted) {
       setState(() {
-        _activeDeviceId = widget.systemShortId ?? AppConfig.mqttDeviceId;
+        _activeDeviceId = (widget.systemId != null && !_isPlaceholderId(widget.systemId))
+            ? widget.systemId!
+            : AppConfig.mqttDeviceId;
         _activeDeviceImei = '';
         _selectedEquipmentName = widget.deviceName ?? 'AC Remote';
         _isLoadingEquipments = false;
@@ -1150,7 +1582,7 @@ class _ACControlPageState extends State<ACControlPage>
   }
 
   Future<String> _fetchEquipmentImei(String equipmentId) async {
-    final companyId = await AuthService.getCompanyId() ?? '';
+    final companyId = widget.companyId ?? await AuthService.getCompanyId() ?? '';
     final siteId = await AuthService.getSiteId() ?? '';
     final bucket = await AuthService.getBucket() ?? '';
     final token = await AuthService.getCookieHeader() ?? '';
@@ -1175,15 +1607,15 @@ class _ACControlPageState extends State<ACControlPage>
           final first = equipData[0];
           return (first['imei'] ??
                   first['Imei'] ??
-                  first['shortId'] ??
-                  first['ShortId'] ??
+                  first['deviceId'] ??
+                  first['DeviceId'] ??
                   '')
               .toString();
         } else if (equipData is Map) {
           return (equipData['imei'] ??
                   equipData['Imei'] ??
-                  equipData['shortId'] ??
-                  equipData['ShortId'] ??
+                  equipData['deviceId'] ??
+                  equipData['DeviceId'] ??
                   '')
               .toString();
         }
@@ -1197,7 +1629,6 @@ class _ACControlPageState extends State<ACControlPage>
   Future<void> _onEquipmentSelected(
     String equipmentId,
     String name,
-    String shortId,
   ) async {
     if (_selectedEquipmentId == equipmentId && _activeDeviceId.isNotEmpty) {
       return;
@@ -1212,7 +1643,13 @@ class _ACControlPageState extends State<ACControlPage>
                 .toString() ==
             equipmentId,
       );
-      foundImei = (match['imei'] ?? match['Imei'])?.toString();
+      foundImei = (match['imei'] ??
+              match['Imei'] ??
+              match['deviceId'] ??
+              match['DeviceId'] ??
+              match['device_id'])
+          ?.toString()
+          .trim();
     } catch (_) {}
 
     final bool isEqOnline = match != null
@@ -1226,18 +1663,63 @@ class _ACControlPageState extends State<ACControlPage>
                     match['onOffStatus']['status'] == 'ONLINE')))
         : false;
 
+    // Strictly resolve target hardware identity from IMEI and deviceId (never use shortId)
+    String deviceId = '';
+    if (foundImei != null && foundImei.isNotEmpty && !_isPlaceholderId(foundImei)) {
+      deviceId = foundImei;
+    } else {
+      final fetchedImei = await _fetchEquipmentImei(equipmentId);
+      if (fetchedImei.isNotEmpty && !_isPlaceholderId(fetchedImei)) {
+        deviceId = fetchedImei;
+      } else {
+        final devIdFromData = (match != null
+                ? (match['deviceId'] ??
+                    match['DeviceId'] ??
+                    match['device_id'] ??
+                    match['imei'] ??
+                    match['Imei'])
+                : null)
+            ?.toString()
+            .trim();
+        if (devIdFromData != null &&
+            devIdFromData.isNotEmpty &&
+            !_isPlaceholderId(devIdFromData)) {
+          deviceId = devIdFromData;
+        } else if (widget.systemShortId != null &&
+            !_isPlaceholderId(widget.systemShortId)) {
+          deviceId = widget.systemShortId!;
+        } else if (widget.systemId != null && !_isPlaceholderId(widget.systemId)) {
+          deviceId = widget.systemId!;
+        } else {
+          deviceId = equipmentId;
+        }
+      }
+    }
+
+    final String finalImei = (foundImei != null && foundImei.isNotEmpty && !_isPlaceholderId(foundImei))
+        ? foundImei
+        : (deviceId.isNotEmpty && !_isPlaceholderId(deviceId) ? deviceId : '');
+
     _heartbeatTimer?.cancel();
+
+    final prefs = await SharedPreferences.getInstance();
+    final savedPower = prefs.getBool('ac_power_$equipmentId') ??
+        (deviceId.isNotEmpty ? prefs.getBool('ac_power_$deviceId') : null) ??
+        _mqtt.getLastStateFor(deviceId)?.isPowerOn;
+
+    final String newEqKey = equipmentId.isNotEmpty ? equipmentId : deviceId;
+    _lastPowerToggleTime = _equipmentPowerToggleTimes[newEqKey];
+    _pendingPower = _equipmentPendingPower[newEqKey] ?? false;
+    _lastUserTempChangeTime = _equipmentUserTempTimes[newEqKey];
+    _userTempOverride = _equipmentUserTempOverrides[newEqKey] ?? false;
+    _pendingTemp = false;
 
     setState(() {
       _selectedEquipmentId = equipmentId;
       _selectedEquipmentName = name;
-      _selectedEquipmentShortId = shortId;
       _isLoadingEquipments = true;
       _isConnected = false;
       _isActive = isEqOnline;
-      _userTempOverride = false;
-      _lastUserTempChangeTime = null;
-      _pendingTemp = false;
       if (match != null) {
         if (match['setTemp'] != null) {
           final sTemp = int.tryParse(match['setTemp'].toString());
@@ -1259,24 +1741,23 @@ class _ACControlPageState extends State<ACControlPage>
         final statusVal = match['onOffStatus'] is Map
             ? match['onOffStatus']['status']?.toString().toUpperCase()
             : match['status']?.toString().toUpperCase();
+
         if (statusVal == 'ON') {
           _isPowerOn = true;
           _fanRotationCtrl.repeat();
         } else if (statusVal == 'OFF') {
           _isPowerOn = false;
           _fanRotationCtrl.stop();
+        } else if (savedPower != null) {
+          _isPowerOn = savedPower;
+          if (_isPowerOn) {
+            _fanRotationCtrl.repeat();
+          } else {
+            _fanRotationCtrl.stop();
+          }
         }
       }
-      if (!_isActive) {
-        _isPowerOn = false;
-        _fanRotationCtrl.stop();
-      }
     });
-
-    final String resolvedDeviceId = foundImei != null && foundImei.isNotEmpty
-        ? foundImei
-        : await _fetchEquipmentImei(equipmentId);
-    String deviceId = resolvedDeviceId.isNotEmpty ? resolvedDeviceId : shortId;
 
     if (mounted) {
       _loadingTimeoutTimer?.cancel();
@@ -1290,9 +1771,11 @@ class _ACControlPageState extends State<ACControlPage>
 
       setState(() {
         _activeDeviceId = deviceId;
-        _activeDeviceImei = resolvedDeviceId;
+        _activeDeviceImei = finalImei;
       });
+      _mqtt.setDeviceId(deviceId, imei: finalImei.isNotEmpty ? finalImei : null);
       _connectMqtt();
+      _fetchStatusViaApi();
     }
   }
 
@@ -1344,7 +1827,7 @@ class _ACControlPageState extends State<ACControlPage>
     final topPadding = MediaQuery.of(context).padding.top;
     late final OverlayEntry entry;
     entry = OverlayEntry(
-      builder: (ctx) => _TopMessageBarWidget(
+      builder: (ctx) => TopMessageBarWidget(
         message: msg,
         color: color,
         icon: icon,
@@ -1392,8 +1875,10 @@ class _ACControlPageState extends State<ACControlPage>
       } catch (_) {}
       _currentTopBanner = null;
     }
+    _apiPollingTimer?.cancel();
     _apiSyncTimer?.cancel();
     _apiSyncSecondaryTimer?.cancel();
+    _apiSyncTertiaryTimer?.cancel();
     _loadingTimeoutTimer?.cancel();
     _reconnectingWifiTimeoutTimer?.cancel();
     _heartbeatTimer?.cancel();
@@ -1410,15 +1895,16 @@ class _ACControlPageState extends State<ACControlPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      debugPrint('🔄 [Lifecycle] App resumed. Reconnecting MQTT and SSE...');
+      debugPrint('🔄 [Lifecycle] App resumed. Reconnecting MQTT, SSE and refreshing API status...');
       _connectMqtt();
+      _fetchStatusViaApi();
     }
   }
 
   // ── MQTT Actions ──────────────────────────────────────────────────────
 
   void _togglePower() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
+    if (!_isControlAvailable) {
       _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
           AppColors.offline,
           icon: Icons.wifi_off_rounded);
@@ -1432,6 +1918,11 @@ class _ACControlPageState extends State<ACControlPage>
 
     final wasPowerOn = _isPowerOn;
     _addLog('Power turned ${wasPowerOn ? "OFF" : "ON"}', AppColors.online);
+
+    final String eqKey = _selectedEquipmentId.isNotEmpty
+        ? _selectedEquipmentId
+        : _effectiveDeviceId;
+
     setState(() {
       _isPowerOn = !wasPowerOn;
       _pendingPower = true;
@@ -1443,807 +1934,275 @@ class _ACControlPageState extends State<ACControlPage>
       _userTempOverride =
           !wasPowerOn; // true when turning ON, false when turning OFF
       _pendingTemp = false;
+      // SIRIS v2 Spec Note 3: ON / OFF silently disable auto mode (autoMode=false, state HOLD)
+      _isAutomated = false;
       if (_isPowerOn) {
         _fanRotationCtrl.repeat();
       } else {
         _fanRotationCtrl.stop();
       }
+
+      if (eqKey.isNotEmpty) {
+        _equipmentPowerToggleTimes[eqKey] = _lastPowerToggleTime!;
+        _equipmentPendingPower[eqKey] = true;
+        _equipmentUserTempTimes[eqKey] = _lastUserTempChangeTime!;
+        _equipmentUserTempOverrides[eqKey] = _userTempOverride;
+      }
+    });
+
+    SharedPreferences.getInstance().then((prefs) {
+      if (_selectedEquipmentId.isNotEmpty) {
+        prefs.setBool('ac_power_$_selectedEquipmentId', _isPowerOn);
+      }
+      prefs.setBool('auto_enabled', false);
     });
 
     if (wasPowerOn) {
-      _mqtt.turnAcOff(targetDeviceId: _effectiveDeviceId);
+      _mqtt.turnAcOff(
+        targetDeviceId: _effectiveDeviceId,
+        targetDeviceImei:
+            _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+      );
     } else {
-      _mqtt.turnAcOn(targetDeviceId: _effectiveDeviceId);
-      Future.delayed(const Duration(milliseconds: 300), () {
-        _mqtt.setTemperature(24, targetDeviceId: _effectiveDeviceId);
-      });
+      _mqtt.turnAcOn(
+        targetDeviceId: _effectiveDeviceId,
+        targetDeviceImei:
+            _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+      );
     }
-  }
 
-  Future<Map<String, dynamic>?> _fetchActiveEquipmentStatusFromApi() async {
-    try {
-      final companyId = await AuthService.getCompanyId() ?? '';
-      final siteId = await AuthService.getSiteId() ?? '';
-      final token = await AuthService.getCookieHeader() ?? '';
-      String zoneId = await AuthService.getZoneId() ?? '';
-      if (zoneId.isEmpty) {
-        for (var e in _equipmentsData) {
-          final z = (e['zoneId'] ?? e['ZoneId'] ?? '').toString();
-          if (z.isNotEmpty && z != '00000000-0000-0000-0000-000000000000') {
-            zoneId = z;
-            break;
-          }
-        }
-      }
-      if (companyId.isEmpty || siteId.isEmpty || zoneId.isEmpty) {
-        return null;
-      }
-
-      final statusUrl =
-          '${AppConfig.provisionBaseUrl}/mqtt/ac/status?companyId=$companyId&siteId=$siteId&zoneId=$zoneId';
-      final response = await http.get(
-        Uri.parse(statusUrl),
-        headers: {
-          'Authorization': 'Bearer $token',
-          'Cookie': 'auth_token=$token',
-          'Content-Type': 'application/json',
-        },
-      ).timeout(const Duration(seconds: 4));
-
-      if (response.statusCode == 200) {
-        final body = jsonDecode(response.body);
-        final List<dynamic> systemsData = body['systems'] ?? [];
-        final targetId = _selectedEquipmentId.toLowerCase().trim();
-        final devId = _effectiveDeviceId.toLowerCase().trim();
-        final activeImei = _activeDeviceImei.toLowerCase().trim();
-        final activeDevId = _activeDeviceId.toLowerCase().trim();
-        final shortId = _selectedEquipmentShortId.toLowerCase().trim();
-        final equipName = _selectedEquipmentName.toLowerCase().trim();
-
-        for (var sys in systemsData) {
-          final List<dynamic> eqs = sys['equipments'] ?? [];
-          for (var eq in eqs) {
-            final eqMap = Map<String, dynamic>.from(eq);
-            final eqId = (eq['equipmentId'] ?? eq['EquipmentId'] ?? eq['id'] ?? eq['Id'] ?? '')
-                .toString().toLowerCase().trim();
-            final sId = (eq['shortId'] ?? eq['ShortId'] ?? '')
-                .toString().toLowerCase().trim();
-            final imei = (eq['imei'] ?? eq['Imei'] ?? '')
-                .toString().toLowerCase().trim();
-            final name = (eq['name'] ?? eq['Name'] ?? '')
-                .toString().toLowerCase().trim();
-
-            final bool matches = (targetId.isNotEmpty && (eqId == targetId || sId == targetId)) ||
-                (devId.isNotEmpty && (sId == devId || imei == devId || name == devId || eqId == devId)) ||
-                (activeDevId.isNotEmpty && (sId == activeDevId || imei == activeDevId || name == activeDevId || eqId == activeDevId)) ||
-                (activeImei.isNotEmpty && imei == activeImei) ||
-                (shortId.isNotEmpty && sId == shortId) ||
-                (equipName.isNotEmpty && name == equipName);
-
-            if (matches) {
-              return eqMap;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('⚠️ [ACControl] API status query error: $e');
-    }
-    return null;
-  }
-
-  void _syncTemperatureViaApi() {
-    _apiSyncTimer?.cancel();
-    _apiSyncSecondaryTimer?.cancel();
-
-    // Query API after brief propagation delay (1.2s) to verify response
-    _apiSyncTimer = Timer(const Duration(milliseconds: 1200), () async {
-      await _confirmTempFromApi(showFeedback: true);
+    // Follow up by checking live equipment status via API
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) _fetchStatusViaApi();
     });
-
-    // Secondary poll (3.0s) to catch any delayed Redis update from hardware telemetry
-    _apiSyncSecondaryTimer = Timer(const Duration(milliseconds: 3000), () async {
-      await _confirmTempFromApi(showFeedback: false);
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (mounted) _fetchStatusViaApi();
     });
-  }
-
-  Future<void> _confirmTempFromApi({bool showFeedback = false}) async {
-    final status = await _fetchActiveEquipmentStatusFromApi();
-    if (status != null && mounted) {
-      final sTempRaw = status['setTemp'];
-      if (sTempRaw != null) {
-        final apiTemp = int.tryParse(sTempRaw.toString());
-        if (apiTemp != null && apiTemp >= 16 && apiTemp <= 30) {
-          setState(() {
-            _setTemp = apiTemp;
-            _pendingTemp = false;
-          });
-          if (showFeedback) {
-            _showSnack('API Response: Set Temp confirmed at $_setTemp°C', AppColors.coolBlue);
-            _addLog('API Response: Temperature confirmed at $_setTemp°C', AppColors.coolBlue);
-          }
-        }
-      }
-      if (status['currentTemp'] != null) {
-        final cTemp = (status['currentTemp'] as num?)?.toInt() ??
-            int.tryParse(status['currentTemp'].toString());
-        if (cTemp != null && cTemp > 0) {
-          setState(() => _currentTemp = cTemp);
-        }
-      }
-      if (status['hum'] != null) {
-        final h = (status['hum'] as num?)?.round() ??
-            int.tryParse(status['hum'].toString());
-        if (h != null && h > 0) {
-          setState(() => _humidity = h);
-        }
-      }
-    }
   }
 
   void _incrementTemp() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
+    if (!_isPowerOn) {
+      _showSnack('AC is OFF. Turn on AC to adjust temperature.',
+          AppColors.offline,
+          icon: Icons.power_settings_new_rounded);
+      return;
+    }
+    if (!_isControlAvailable) {
       _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
           AppColors.offline,
           icon: Icons.wifi_off_rounded);
       return;
     }
     if (_setTemp >= 30) return;
+    final String eqKey = _selectedEquipmentId.isNotEmpty
+        ? _selectedEquipmentId
+        : _effectiveDeviceId;
     setState(() {
       _setTemp++;
       _userTempOverride = true;
       _pendingTemp = true;
       _lastUserTempChangeTime = DateTime.now();
+      if (eqKey.isNotEmpty) {
+        _equipmentUserTempOverrides[eqKey] = true;
+        _equipmentUserTempTimes[eqKey] = _lastUserTempChangeTime!;
+      }
     });
-    _addLog('Temperature set to $_setTemp°C (via MQTT)', AppColors.coolBlue);
-    _mqtt.setTemperature(_setTemp, targetDeviceId: _effectiveDeviceId);
-    _syncTemperatureViaApi();
+    _addLog('Temperature set to $_setTemp°C (TEMP_UP / TEMP:$_setTemp)', AppColors.coolBlue);
+    _mqtt.tempUp(
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
+    _mqtt.setTemperature(
+      _setTemp,
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
     Future.delayed(const Duration(seconds: 4), () {
       if (mounted && _pendingTemp) {
         setState(() => _pendingTemp = false);
       }
     });
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) _fetchStatusViaApi();
+    });
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (mounted) _fetchStatusViaApi();
+    });
   }
 
   void _decrementTemp() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
+    if (!_isPowerOn) {
+      _showSnack('AC is OFF. Turn on AC to adjust temperature.',
+          AppColors.offline,
+          icon: Icons.power_settings_new_rounded);
+      return;
+    }
+    if (!_isControlAvailable) {
       _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
           AppColors.offline,
           icon: Icons.wifi_off_rounded);
       return;
     }
     if (_setTemp <= 16) return;
+    final String eqKey = _selectedEquipmentId.isNotEmpty
+        ? _selectedEquipmentId
+        : _effectiveDeviceId;
     setState(() {
       _setTemp--;
       _userTempOverride = true;
       _pendingTemp = true;
       _lastUserTempChangeTime = DateTime.now();
+      if (eqKey.isNotEmpty) {
+        _equipmentUserTempOverrides[eqKey] = true;
+        _equipmentUserTempTimes[eqKey] = _lastUserTempChangeTime!;
+      }
     });
-    _addLog('Temperature set to $_setTemp°C (via MQTT)', AppColors.coolBlue);
-    _mqtt.setTemperature(_setTemp, targetDeviceId: _effectiveDeviceId);
-    _syncTemperatureViaApi();
+    _addLog('Temperature set to $_setTemp°C (TEMP_DOWN / TEMP:$_setTemp)', AppColors.coolBlue);
+    _mqtt.tempDown(
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
+    _mqtt.setTemperature(
+      _setTemp,
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
     Future.delayed(const Duration(seconds: 4), () {
       if (mounted && _pendingTemp) {
         setState(() => _pendingTemp = false);
       }
     });
-  }
-
-  void _cycleMode() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-      _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
-          AppColors.offline,
-          icon: Icons.wifi_off_rounded);
-      return;
-    }
-    if (!_isPowerOn) return;
-    final modes = ['Cool', 'Heat', 'Dry', 'Auto'];
-    int idx = modes.indexOf(_mode);
-    setState(() {
-      _mode = modes[(idx + 1) % modes.length];
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) _fetchStatusViaApi();
     });
-    _addLog('Mode set to $_mode', AppColors.coolBlue);
-    _mqtt.sendControlCommand('SEND:MODE', targetDeviceId: _effectiveDeviceId);
-    _showSnack('Mode changed to $_mode', AppColors.primary);
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (mounted) _fetchStatusViaApi();
+    });
   }
 
-  void _cycleFanSpeed() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
+  /// SIRIS v2 Spec Section 2: Reset setpoint to 24°C default via TEMP_CLEAR
+  void _resetTempToDefault() {
+    if (!_isPowerOn) {
+      _showSnack('AC is OFF. Turn on AC to adjust temperature.',
+          AppColors.offline,
+          icon: Icons.power_settings_new_rounded);
+      return;
+    }
+    if (!_isControlAvailable) {
       _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
           AppColors.offline,
           icon: Icons.wifi_off_rounded);
       return;
     }
-    if (!_isPowerOn) return;
+    final String eqKey = _selectedEquipmentId.isNotEmpty
+        ? _selectedEquipmentId
+        : _effectiveDeviceId;
     setState(() {
-      if (_fanSpeed == 'Auto') {
-        _fanSpeed = 'Low';
-        _fanRotationCtrl.duration = const Duration(seconds: 4);
-        if (_isPowerOn) _fanRotationCtrl.repeat();
-      } else if (_fanSpeed == 'Low') {
-        _fanSpeed = 'Medium';
-        _fanRotationCtrl.duration = const Duration(seconds: 2);
-        if (_isPowerOn) _fanRotationCtrl.repeat();
-      } else if (_fanSpeed == 'Medium') {
-        _fanSpeed = 'High';
-        _fanRotationCtrl.duration = const Duration(milliseconds: 800);
-        if (_isPowerOn) _fanRotationCtrl.repeat();
-      } else {
-        _fanSpeed = 'Auto';
-        _fanRotationCtrl.duration = const Duration(seconds: 2);
-        if (_isPowerOn) _fanRotationCtrl.repeat();
+      _setTemp = 24;
+      _userTempOverride = true;
+      _pendingTemp = true;
+      _lastUserTempChangeTime = DateTime.now();
+      if (eqKey.isNotEmpty) {
+        _equipmentUserTempOverrides[eqKey] = true;
+        _equipmentUserTempTimes[eqKey] = _lastUserTempChangeTime!;
       }
     });
-    _addLog('Fan speed set to $_fanSpeed', AppColors.primary);
-    _mqtt.sendControlCommand('SEND:MODE',
-        targetDeviceId:
-            _effectiveDeviceId); // fallback to Mode if Fan key isn't separate
-    _showSnack('Fan speed set to $_fanSpeed', AppColors.primary);
-  }
-
-  void _toggleSwingV() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-      _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
-          AppColors.offline,
-          icon: Icons.wifi_off_rounded);
-      return;
-    }
-    if (!_isPowerOn) return;
-    setState(() => _swingV = !_swingV);
-    _addLog('Vertical Swing ${_swingV ? 'ON' : 'OFF'}', AppColors.primary);
-    _mqtt.sendControlCommand('SEND:SWING', targetDeviceId: _effectiveDeviceId);
-    _showSnack('Vertical Swing ${_swingV ? 'On' : 'Off'}', AppColors.primary);
-  }
-
-  void _toggleSwingH() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-      _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
-          AppColors.offline,
-          icon: Icons.wifi_off_rounded);
-      return;
-    }
-    if (!_isPowerOn) return;
-    setState(() => _swingH = !_swingH);
-    _addLog('Horizontal Swing ${_swingH ? 'ON' : 'OFF'}', AppColors.primary);
-    _mqtt.sendControlCommand('SEND:SWING', targetDeviceId: _effectiveDeviceId);
-    _showSnack('Horizontal Swing ${_swingH ? 'On' : 'Off'}', AppColors.primary);
-  }
-
-  void _toggleLight() {
-    if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-      _showSnack('Device is offline. Connect to Wi-Fi to use controls.',
-          AppColors.offline,
-          icon: Icons.wifi_off_rounded);
-      return;
-    }
-    if (!_isPowerOn) return;
-    setState(() => _lightOn = !_lightOn);
-    _addLog('Light ${_lightOn ? 'ON' : 'OFF'}', AppColors.primary);
-    _mqtt.sendControlCommand('SEND:LIGHT', targetDeviceId: _effectiveDeviceId);
-    _showSnack('Light ${_lightOn ? 'On' : 'Off'}', AppColors.primary);
-  }
-
-  void _showTimerDialog(BuildContext context, bool isDark) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (BuildContext context) {
-        return Container(
-          decoration: BoxDecoration(
-            color: isDark ? AppColors.surfaceDark : Colors.white,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Set Auto-Off Timer',
-                style: GoogleFonts.outfit(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: isDark ? Colors.white : AppColors.textPrimary,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Choose when to automatically turn off the AC.',
-                style: GoogleFonts.inter(
-                  fontSize: 13,
-                  color: isDark ? Colors.white38 : Colors.black45,
-                ),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                children: [
-                  _timerOption(context, '30 min'),
-                  const SizedBox(width: 12),
-                  _timerOption(context, '1 hour'),
-                  const SizedBox(width: 12),
-                  _timerOption(context, '2 hours'),
-                ],
-              ),
-              const SizedBox(height: 24),
-            ],
-          ),
-        );
-      },
+    _addLog('Temperature reset to 24°C (TEMP_CLEAR)', AppColors.coolBlue);
+    _mqtt.tempClear(
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
     );
+    _mqtt.setTemperature(
+      24,
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
+    _showSnack('Target setpoint reset to 24°C (TEMP_CLEAR)', AppColors.primary,
+        icon: Icons.restart_alt_rounded);
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) _fetchStatusViaApi();
+    });
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (mounted) _fetchStatusViaApi();
+    });
   }
 
-
-  bool _validateLunchSchedule(
-      {String? pendingLunchOn, String? pendingLunchOff}) {
-    return true;
-  }
-
-  void _showEditScheduleDialog(BuildContext context, int slot, String type,
-      String currentTime, bool isDark, [StateSetter? setModalState]) {
-    String default24h = '08:00';
-    if (currentTime.contains('AM') || currentTime.contains('PM')) {
-      try {
-        final parts = currentTime.split(' ');
-        final timePart = parts[0];
-        final amPm = parts[1];
-        final timeParts = timePart.split(':');
-        int hour = int.parse(timeParts[0]);
-        final int minute = int.parse(timeParts[1]);
-        if (amPm == 'PM' && hour < 12) hour += 12;
-        if (amPm == 'AM' && hour == 12) hour = 0;
-        default24h =
-            '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
-      } catch (_) {}
+  /// SIRIS v2 Spec Section 2: Toggle Smart Automation Mode (`AUTO:<temp>` / `AUTO_OFF`)
+  void _toggleAutoMode() {
+    if (!_isPowerOn) {
+      _showSnack('AC is OFF. Turn on AC to use smart automation.',
+          AppColors.offline,
+          icon: Icons.power_settings_new_rounded);
+      return;
+    }
+    if (!_isControlAvailable) {
+      _showSnack('Device is offline. Connect to Wi-Fi to use smart automation.',
+          AppColors.offline,
+          icon: Icons.wifi_off_rounded);
+      return;
+    }
+    final bool nextState = !_isAutomated;
+    setState(() {
+      _isAutomated = nextState;
+    });
+    _addLog(
+        'Smart Automation ${nextState ? "ENABLED ($_autoTemp°C)" : "DISABLED"}',
+        AppColors.primary);
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setBool('auto_enabled', nextState);
+    });
+    if (nextState) {
+      _mqtt.enableAutomation(
+        autoTemp: _autoTemp,
+        targetDeviceId: _effectiveDeviceId,
+        targetDeviceImei:
+            _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+      );
     } else {
-      default24h = currentTime;
+      _mqtt.disableAutomation(
+        targetDeviceId: _effectiveDeviceId,
+        targetDeviceImei:
+            _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+      );
     }
-
-    final timeController = TextEditingController(text: default24h);
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        final textCol = isDark ? Colors.white : AppColors.textPrimary;
-        return AlertDialog(
-          backgroundColor: isDark ? const Color(0xFF2D2D44) : Colors.white,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text(
-            slot == 0
-                ? "Configure Lunch ($type)"
-                : "Configure Slot $slot ($type)",
-            style:
-                GoogleFonts.outfit(fontWeight: FontWeight.bold, fontSize: 18),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text("Time (HH:MM in 24h)",
-                  style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: timeController,
-                      keyboardType: TextInputType.datetime,
-                      style: TextStyle(color: textCol),
-                      decoration: InputDecoration(
-                        hintText: "e.g. 08:30 or 17:45",
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 8),
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: const Icon(Icons.access_time_rounded,
-                        color: AppColors.primary),
-                    onPressed: () async {
-                      final TimeOfDay? picked = await showTimePicker(
-                        context: context,
-                        initialTime: TimeOfDay.now(),
-                      );
-                      if (picked != null) {
-                        final String formatted = _timeOfDayTo24h(picked);
-                        timeController.text = formatted;
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("Cancel"),
-            ),
-            TextButton(
-              onPressed: () {
-                final String rawInput = timeController.text.trim().toUpperCase();
-                final bool isPm = rawInput.contains('PM');
-                final bool isAm = rawInput.contains('AM');
-                final String clean = rawInput.replaceAll('AM', '').replaceAll('PM', '').trim();
-                final regExp = RegExp(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$');
-                if (!regExp.hasMatch(clean)) {
-                  _showSnack(
-                      "Invalid time format. Use HH:MM or HH:MM AM/PM", AppColors.offline);
-                  return;
-                }
-
-                final parts = clean.split(':');
-                int hour = int.parse(parts[0]);
-                final int minute = int.parse(parts[1]);
-                if (isPm && hour < 12) hour += 12;
-                if (isAm && hour == 12) hour = 0;
-
-                String time =
-                    '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
-
-                // Check device connection before sending
-                if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-                  _showSnack(
-                      'Device is offline. Connect to Wi-Fi to configure schedules.',
-                      AppColors.offline,
-                      icon: Icons.wifi_off_rounded);
-                  return;
-                }
-
-                if (slot == 0) {
-                  final curLunchDays = _savedSchDays[0] ?? 'ALL';
-                  _userSchOverrideTime[0] = DateTime.now();
-                  _schEnabled[0] = true;
-                  _schSwitchOverrides[0] = true;
-                  if (type == 'ON') {
-                    _savedSchOn[0] = time;
-                    final curLunchOff = (_savedSchOff[0] != null &&
-                            _savedSchOff[0] != 'DISABLED' &&
-                            _savedSchOff[0]!.isNotEmpty &&
-                            _savedSchOff[0] != '--:--')
-                        ? _savedSchOff[0]!
-                        : '13:00';
-                    _savedSchOff[0] = curLunchOff;
-                    LocalCacheService.saveScheduleSlotConfig(
-                        _effectiveDeviceId, 0,
-                        isEnabled: true,
-                        onTime: time,
-                        offTime: curLunchOff,
-                        days: curLunchDays);
-                    _mqtt.setLunchOn(time,
-                        days: curLunchDays, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.publishScheduleJson({
-                      'lunch_on': time,
-                      'lunch_off': curLunchOff,
-                      'lunch_days': curLunchDays,
-                    }, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.updateLunchOptimistic(
-                        lunchOn: time,
-                        lunchOff: curLunchOff,
-                        days: curLunchDays);
-                    setState(() => _lunchOn = time);
-                    if (setModalState != null) setModalState(() {});
-                  } else {
-                    _savedSchOff[0] = time;
-                    final curLunchOn = (_savedSchOn[0] != null &&
-                            _savedSchOn[0] != 'DISABLED' &&
-                            _savedSchOn[0]!.isNotEmpty &&
-                            _savedSchOn[0] != '--:--')
-                        ? _savedSchOn[0]!
-                        : '12:00';
-                    _savedSchOn[0] = curLunchOn;
-                    LocalCacheService.saveScheduleSlotConfig(
-                        _effectiveDeviceId, 0,
-                        isEnabled: true,
-                        onTime: curLunchOn,
-                        offTime: time,
-                        days: curLunchDays);
-                    _mqtt.setLunchOff(time,
-                        days: curLunchDays, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.publishScheduleJson({
-                      'lunch_on': curLunchOn,
-                      'lunch_off': time,
-                      'lunch_days': curLunchDays,
-                    }, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.updateLunchOptimistic(
-                        lunchOn: curLunchOn,
-                        lunchOff: time,
-                        days: curLunchDays);
-                    setState(() => _lunchOff = time);
-                    if (setModalState != null) setModalState(() {});
-                  }
-                  Navigator.pop(context);
-                  _showSnack('Lunch $type set to ${_formatTo12Hour(time)}',
-                      AppColors.primary);
-                } else {
-                  final fallbackOn = (slot == 2
-                      ? '18:00'
-                      : slot == 3
-                          ? '09:00'
-                          : slot == 4
-                              ? '07:00'
-                              : slot == 5
-                                  ? '10:00'
-                                  : '08:00');
-                  final fallbackOff = (slot == 2
-                      ? '23:00'
-                      : slot == 3
-                          ? '17:00'
-                          : slot == 4
-                              ? '15:00'
-                              : slot == 5
-                                  ? '19:00'
-                                  : '13:00');
-                  final curDays = _savedSchDays[slot] ?? 'ALL';
-                  _userSchOverrideTime[slot] = DateTime.now();
-                  _schEnabled[slot] = true;
-                  if (type == 'ON') {
-                    _savedSchOn[slot] = time;
-                    final curOff = (_savedSchOff[slot] != null &&
-                            _savedSchOff[slot] != 'DISABLED' &&
-                            _savedSchOff[slot]!.isNotEmpty &&
-                            _savedSchOff[slot] != '--:--')
-                        ? _savedSchOff[slot]!
-                        : fallbackOff;
-                    _savedSchOff[slot] = curOff;
-                    LocalCacheService.saveScheduleSlotConfig(
-                        _effectiveDeviceId, slot,
-                        isEnabled: true,
-                        onTime: time,
-                        offTime: curOff,
-                        days: curDays);
-                    _mqtt.setScheduleOn(slot, time,
-                        days: curDays, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.publishScheduleJson({
-                      'on$slot': time,
-                      'off$slot': curOff,
-                      'days$slot': curDays,
-                    }, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.updateScheduleOptimistic(
-                        slot: slot,
-                        onTime: time,
-                        offTime: curOff,
-                        days: curDays);
-                    setState(() {
-                      if (slot == 1)
-                        _schOn1 = time;
-                      else if (slot == 2)
-                        _schOn2 = time;
-                      else if (slot == 3)
-                        _schOn3 = time;
-                      else if (slot == 4)
-                        _schOn4 = time;
-                      else if (slot == 5) _schOn5 = time;
-                    });
-                    if (setModalState != null) setModalState(() {});
-                  } else {
-                    _savedSchOff[slot] = time;
-                    final curOn = (_savedSchOn[slot] != null &&
-                            _savedSchOn[slot] != 'DISABLED' &&
-                            _savedSchOn[slot]!.isNotEmpty &&
-                            _savedSchOn[slot] != '--:--')
-                        ? _savedSchOn[slot]!
-                        : fallbackOn;
-                    _savedSchOn[slot] = curOn;
-                    LocalCacheService.saveScheduleSlotConfig(
-                        _effectiveDeviceId, slot,
-                        isEnabled: true,
-                        onTime: curOn,
-                        offTime: time,
-                        days: curDays);
-                    _mqtt.setScheduleOff(slot, time,
-                        days: curDays, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.publishScheduleJson({
-                      'on$slot': curOn,
-                      'off$slot': time,
-                      'days$slot': curDays,
-                    }, targetDeviceId: _effectiveDeviceId);
-                    _mqtt.updateScheduleOptimistic(
-                        slot: slot,
-                        onTime: curOn,
-                        offTime: time,
-                        days: curDays);
-                    setState(() {
-                      if (slot == 1)
-                        _schOff1 = time;
-                      else if (slot == 2)
-                        _schOff2 = time;
-                      else if (slot == 3)
-                        _schOff3 = time;
-                      else if (slot == 4)
-                        _schOff4 = time;
-                      else if (slot == 5) _schOff5 = time;
-                    });
-                    if (setModalState != null) setModalState(() {});
-                  }
-                  Navigator.pop(context);
-                  _showSnack(
-                      'Schedule $type set to ${_formatTo12Hour(time)} for Slot $slot',
-                      AppColors.primary);
-                }
-
-                // Query status after a delay to confirm device received the command
-                Future.delayed(const Duration(milliseconds: 800), () {
-                  _mqtt.getScheduleStatus(targetDeviceId: _effectiveDeviceId);
-                });
-                // Second query for slower hardware
-                Future.delayed(const Duration(milliseconds: 2500), () {
-                  _mqtt.getScheduleStatus(targetDeviceId: _effectiveDeviceId);
-                });
-              },
-              child: const Text("Save",
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, color: Colors.green)),
-            ),
-          ],
-        );
-      },
+    _showSnack(
+      'Smart Automation ${nextState ? "Enabled ($_autoTemp°C)" : "Disabled"}',
+      nextState ? AppColors.online : AppColors.offline,
+      icon: Icons.smart_toy_rounded,
     );
+    Future.delayed(const Duration(milliseconds: 1000), () {
+      if (mounted) _fetchStatusViaApi();
+    });
   }
 
-  String _formatLastSeen(DateTime dt) {
-    final diff = DateTime.now().difference(dt);
-    if (diff.inSeconds < 5) return 'just now';
-    if (diff.inSeconds < 60) return '${diff.inSeconds}s ago';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-    if (diff.inHours < 24) return '${diff.inHours}h ago';
-    return '${diff.inDays}d ago';
+  /// SIRIS v2 Spec Section 2 & 8: Request full telemetry snapshot via STATUS
+  void _requestStatus() {
+    _mqtt.sendStatus(
+      targetDeviceId: _effectiveDeviceId,
+      targetDeviceImei:
+          _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+    );
+    _showSnack('Requesting live status from device (STATUS)', AppColors.coolBlue,
+        icon: Icons.sync_rounded);
+    _fetchStatusViaApi();
   }
+
+  String _formatLastSeen(DateTime dt) => formatLastSeen(dt);
 
   void _showSseInfoDialog(BuildContext context, bool isDark) {
-    final textCol = isDark ? Colors.white : AppColors.textPrimary;
-    final subtextCol = isDark ? Colors.white54 : Colors.black54;
-    showDialog(
+    showSseInfoDialog(
       context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: isDark ? const Color(0xFF2D2D44) : Colors.white,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Row(
-            children: [
-              Icon(
-                _mqtt.isSseConnected
-                    ? Icons.sensors_rounded
-                    : Icons.sensors_off_rounded,
-                color: _mqtt.isSseConnected ? Colors.green : Colors.red,
-                size: 22,
-              ),
-              const SizedBox(width: 10),
-              Text(
-                'Stream Status',
-                style: GoogleFonts.outfit(
-                  fontWeight: FontWeight.w800,
-                  fontSize: 18,
-                  color: textCol,
-                ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _sseInfoRow(
-                  'Connection',
-                  _mqtt.isSseConnected ? 'Connected' : 'Disconnected',
-                  _mqtt.isSseConnected ? Colors.green : Colors.red,
-                  isDark),
-              const SizedBox(height: 12),
-              _sseInfoRow(
-                  'Endpoint', '/mqtt/stream', AppColors.primary, isDark),
-              const SizedBox(height: 12),
-              _sseInfoRow(
-                'Last Data',
-                _mqtt.sseLastDataTime != null
-                    ? _formatLastSeen(_mqtt.sseLastDataTime!)
-                    : 'No data received',
-                subtextCol,
-                isDark,
-              ),
-              const SizedBox(height: 12),
-              _sseInfoRow(
-                  'Device ID',
-                  _activeDeviceId.isNotEmpty ? _activeDeviceId : '--',
-                  subtextCol,
-                  isDark),
-              const SizedBox(height: 12),
-              _sseInfoRow(
-                  'IMEI',
-                  _activeDeviceImei.isNotEmpty ? _activeDeviceImei : '--',
-                  subtextCol,
-                  isDark),
-              if (_mqtt.sseLastPayload != null) ...[
-                const SizedBox(height: 16),
-                Text(
-                  'Last Payload',
-                  style: GoogleFonts.inter(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: subtextCol),
-                ),
-                const SizedBox(height: 6),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: isDark ? Colors.black26 : Colors.grey[100],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  constraints: const BoxConstraints(maxHeight: 120),
-                  child: SingleChildScrollView(
-                    child: Text(
-                      _mqtt.sseLastPayload!,
-                      style: GoogleFonts.robotoMono(
-                        fontSize: 9,
-                        color: isDark ? Colors.white60 : Colors.black54,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text('Close', style: TextStyle(color: AppColors.primary)),
-            ),
-          ],
-        );
-      },
+      isDark: isDark,
+      mqtt: _mqtt,
+      activeDeviceId: _effectiveDeviceId,
+      activeDeviceImei: _activeDeviceImei,
     );
-  }
-
-  List<String> _parseScheduleDaysList(String? rawDays) {
-    if (rawDays == null || rawDays.isEmpty || rawDays.toUpperCase() == 'ALL') {
-      return ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-    }
-    if (rawDays.toUpperCase() == 'DISABLED') {
-      return [];
-    }
-    final tokens =
-        rawDays.toUpperCase().split(',').map((s) => s.trim()).toList();
-    const allDays = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
-    final matched = allDays.where((d) => tokens.contains(d)).toList();
-    return matched.isEmpty ? List.from(allDays) : matched;
-  }
-
-  String _formatScheduleDaysSummary(List<String> activeDays) {
-    if (activeDays.length == 7) {
-      return 'Everyday (All 7 Days)';
-    }
-    if (activeDays.length == 5 &&
-        activeDays.contains('MON') &&
-        activeDays.contains('TUE') &&
-        activeDays.contains('WED') &&
-        activeDays.contains('THU') &&
-        activeDays.contains('FRI')) {
-      return 'Weekdays (Mon - Fri)';
-    }
-    if (activeDays.length == 2 &&
-        activeDays.contains('SAT') &&
-        activeDays.contains('SUN')) {
-      return 'Weekend (Sat, Sun)';
-    }
-    if (activeDays.isEmpty) {
-      return 'No days selected';
-    }
-    const nameMap = {
-      'MON': 'Mon',
-      'TUE': 'Tue',
-      'WED': 'Wed',
-      'THU': 'Thu',
-      'FRI': 'Fri',
-      'SAT': 'Sat',
-      'SUN': 'Sun'
-    };
-    return activeDays.map((d) => nameMap[d] ?? d).join(', ');
   }
 
   Widget _buildWeeklyDaysSelector({
@@ -2253,1445 +2212,27 @@ class _ACControlPageState extends State<ACControlPage>
     required StateSetter setModalState,
   }) {
     final rawDays = _savedSchDays[slot] ?? 'ALL';
-    final List<String> activeDays = _parseScheduleDaysList(rawDays);
-    final String summaryText = _formatScheduleDaysSummary(activeDays);
-
-    const List<String> dayKeys = [
-      'MON',
-      'TUE',
-      'WED',
-      'THU',
-      'FRI',
-      'SAT',
-      'SUN'
-    ];
-    const List<String> dayLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
-    void updateDays(List<String> newDays) {
-      if (!isEnabled) {
-        _showSnack(
-          slot == 0
-              ? 'Please turn on Lunch Period first'
-              : 'Please turn on Schedule Slot $slot first',
-          AppColors.warning,
-        );
-        return;
-      }
-      if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-        _showSnack(
-            'Device is offline. Connect to Wi-Fi to update schedules.',
-            AppColors.offline,
-            icon: Icons.wifi_off_rounded);
-        return;
-      }
-      final formattedDays = newDays.length == 7
-          ? 'ALL'
-          : (newDays.isEmpty ? 'DISABLED' : newDays.join(','));
-      _userSchOverrideTime[slot] = DateTime.now();
-      setModalState(() {
-        _savedSchDays[slot] = formattedDays;
-      });
-      setState(() {
-        _savedSchDays[slot] = formattedDays;
-      });
-      LocalCacheService.saveScheduleSlotConfig(
-        _effectiveDeviceId,
-        slot,
-        days: formattedDays,
-      );
-      if (slot == 0) {
-        _mqtt.publishScheduleJson({
-          'lunch_days': formattedDays,
-        }, targetDeviceId: _effectiveDeviceId);
-        _mqtt.updateLunchOptimistic(days: formattedDays);
-      } else {
-        _mqtt.publishScheduleJson({
-          'days$slot': formattedDays,
-        }, targetDeviceId: _effectiveDeviceId);
-        _mqtt.updateScheduleOptimistic(slot: slot, days: formattedDays);
-      }
-      _showSnack(
-        slot == 0
-            ? 'Lunch schedule days updated ($summaryText)'
-            : 'Schedule Slot $slot days updated ($summaryText)',
-        AppColors.online,
-      );
-    }
-
-    return Opacity(
-      opacity: isEnabled ? 1.0 : 0.6,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              Icon(
-                Icons.calendar_today_outlined,
-                size: 15,
-                color: isEnabled
-                    ? const Color(0xFF10B981)
-                    : (isDark ? Colors.white30 : Colors.black26),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  summaryText,
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: isEnabled
-                        ? (isDark ? Colors.white70 : AppColors.textPrimary)
-                        : (isDark ? Colors.white38 : Colors.black38),
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: List.generate(7, (i) {
-              final dayKey = dayKeys[i];
-              final dayLabel = dayLabels[i];
-              final bool isSelected = activeDays.contains(dayKey);
-
-              Color chipBg;
-              Color chipText;
-              if (isEnabled) {
-                chipBg = isSelected
-                    ? const Color(0xFF10B981)
-                    : (isDark
-                        ? const Color(0xFF222B3D)
-                        : const Color(0xFFE2E8F0));
-                chipText = isSelected
-                    ? Colors.white
-                    : (isDark ? Colors.white38 : Colors.black38);
-              } else {
-                chipBg = isSelected
-                    ? (isDark
-                        ? const Color(0xFF133E32)
-                        : const Color(0xFFD1FAE5))
-                    : (isDark
-                        ? const Color(0xFF161C28)
-                        : const Color(0xFFF1F5F9));
-                chipText = isSelected
-                    ? (isDark
-                        ? const Color(0xFF34D399)
-                        : const Color(0xFF059669))
-                    : (isDark
-                        ? const Color(0xFF333E52)
-                        : const Color(0xFFA0AEC0));
-              }
-
-              return Expanded(
-                child: Padding(
-                  padding: EdgeInsets.only(right: i < 6 ? 6.0 : 0.0),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () {
-                      if (!isEnabled) {
-                        _showSnack(
-                          slot == 0
-                              ? 'Please turn on Lunch Period first'
-                              : 'Please turn on Schedule Slot $slot first',
-                          AppColors.warning,
-                        );
-                        return;
-                      }
-                      final nextDays = List<String>.from(activeDays);
-                      if (isSelected) {
-                        if (nextDays.length > 1) {
-                          nextDays.remove(dayKey);
-                        } else {
-                          _showSnack('At least one day must remain selected',
-                              AppColors.warning);
-                          return;
-                        }
-                      } else {
-                        nextDays.add(dayKey);
-                      }
-                      updateDays(nextDays);
-                    },
-                    child: Container(
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: chipBg,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      alignment: Alignment.center,
-                      child: Text(
-                        dayLabel,
-                        style: GoogleFonts.outfit(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: chipText,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sseInfoRow(
-      String label, String value, Color valueColor, bool isDark) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(
-          label,
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: isDark ? Colors.white38 : Colors.black38,
-          ),
-        ),
-        Flexible(
-          child: Text(
-            value,
-            style: GoogleFonts.inter(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: valueColor,
-            ),
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.end,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _showSchedulesSheet(BuildContext context, bool isDark) async {
-    await _loadCachedSchedules();
-    if (!mounted) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (BuildContext context) {
-        int activeTab = 0;
-        final cardBg =
-            isDark ? AppColors.backgroundDark : const Color(0xFFF1F5F9);
-        final textCol = isDark ? Colors.white : AppColors.textPrimary;
-        final subtextCol = isDark ? Colors.white38 : Colors.black45;
-
-        return StreamBuilder<SirisDeviceState>(
-          stream: _mqtt.stateStream.where(_isStateForActiveDevice),
-          initialData: _mqtt.getLastStateFor(_effectiveDeviceId) ??
-              (_mqtt.lastState != null &&
-                      _isStateForActiveDevice(_mqtt.lastState!)
-                  ? _mqtt.lastState
-                  : null),
-          builder: (context, snapshot) {
-            final state = snapshot.data;
-            final String schOn1 = (_savedSchOn[1] != null &&
-                    _savedSchOn[1] != 'DISABLED' &&
-                    _savedSchOn[1]!.isNotEmpty)
-                ? _savedSchOn[1]!
-                : (state?.schOn1 ?? _schOn1);
-            final String schOff1 = (_savedSchOff[1] != null &&
-                    _savedSchOff[1] != 'DISABLED' &&
-                    _savedSchOff[1]!.isNotEmpty)
-                ? _savedSchOff[1]!
-                : (state?.schOff1 ?? _schOff1);
-            final String schOn2 = (_savedSchOn[2] != null &&
-                    _savedSchOn[2] != 'DISABLED' &&
-                    _savedSchOn[2]!.isNotEmpty)
-                ? _savedSchOn[2]!
-                : (state?.schOn2 ?? _schOn2);
-            final String schOff2 = (_savedSchOff[2] != null &&
-                    _savedSchOff[2] != 'DISABLED' &&
-                    _savedSchOff[2]!.isNotEmpty)
-                ? _savedSchOff[2]!
-                : (state?.schOff2 ?? _schOff2);
-            final String schOn3 = (_savedSchOn[3] != null &&
-                    _savedSchOn[3] != 'DISABLED' &&
-                    _savedSchOn[3]!.isNotEmpty)
-                ? _savedSchOn[3]!
-                : (state?.schOn3 ?? _schOn3);
-            final String schOff3 = (_savedSchOff[3] != null &&
-                    _savedSchOff[3] != 'DISABLED' &&
-                    _savedSchOff[3]!.isNotEmpty)
-                ? _savedSchOff[3]!
-                : (state?.schOff3 ?? _schOff3);
-            final String schOn4 = (_savedSchOn[4] != null &&
-                    _savedSchOn[4] != 'DISABLED' &&
-                    _savedSchOn[4]!.isNotEmpty)
-                ? _savedSchOn[4]!
-                : (state?.schOn4 ?? _schOn4);
-            final String schOff4 = (_savedSchOff[4] != null &&
-                    _savedSchOff[4] != 'DISABLED' &&
-                    _savedSchOff[4]!.isNotEmpty)
-                ? _savedSchOff[4]!
-                : (state?.schOff4 ?? _schOff4);
-            final String schOn5 = (_savedSchOn[5] != null &&
-                    _savedSchOn[5] != 'DISABLED' &&
-                    _savedSchOn[5]!.isNotEmpty)
-                ? _savedSchOn[5]!
-                : (state?.schOn5 ?? _schOn5);
-            final String schOff5 = (_savedSchOff[5] != null &&
-                    _savedSchOff[5] != 'DISABLED' &&
-                    _savedSchOff[5]!.isNotEmpty)
-                ? _savedSchOff[5]!
-                : (state?.schOff5 ?? _schOff5);
-            final String schOnLunch = (_savedSchOn[0] != null &&
-                    _savedSchOn[0] != 'DISABLED' &&
-                    _savedSchOn[0]!.isNotEmpty)
-                ? _savedSchOn[0]!
-                : (state?.lunchOn ?? _lunchOn);
-            final String schOffLunch = (_savedSchOff[0] != null &&
-                    _savedSchOff[0] != 'DISABLED' &&
-                    _savedSchOff[0]!.isNotEmpty)
-                ? _savedSchOff[0]!
-                : (state?.lunchOff ?? _lunchOff);
-
-            if (state != null) {
-              _syncSavedScheduleTimes(state);
-            }
-
-            // Sync overrides with telemetry — clear override only when hardware confirms
-            final Map<int, String> slotOnMap = {
-              1: schOn1,
-              2: schOn2,
-              3: schOn3,
-              4: schOn4,
-              5: schOn5
-            };
-            final Map<int, String> slotOffMap = {
-              1: schOff1,
-              2: schOff2,
-              3: schOff3,
-              4: schOff4,
-              5: schOff5
-            };
-            for (int slot in List.from(_schSwitchOverrides.keys)) {
-              if (slot == 0) {
-                final bool telemetryActive =
-                    (schOnLunch != 'DISABLED' || schOffLunch != 'DISABLED');
-                if (_schSwitchOverrides[0] == telemetryActive) {
-                  _schSwitchOverrides.remove(0);
-                  _schOverrideTimers[0]?.cancel();
-                  _schOverrideTimers.remove(0);
-                }
-              } else {
-                final bool telemetryActive = (slotOnMap[slot] != 'DISABLED' ||
-                    slotOffMap[slot] != 'DISABLED');
-                if (_schSwitchOverrides[slot] == telemetryActive) {
-                  _schSwitchOverrides.remove(slot);
-                  _schOverrideTimers[slot]?.cancel();
-                  _schOverrideTimers.remove(slot);
-                }
-              }
-            }
-
-            return StatefulBuilder(
-              builder: (BuildContext context, StateSetter setModalState) {
-                return Container(
-                  height: MediaQuery.of(context).size.height * 0.7,
-                  decoration: BoxDecoration(
-                    color: isDark ? AppColors.surfaceDark : Colors.white,
-                    borderRadius:
-                        const BorderRadius.vertical(top: Radius.circular(24)),
-                  ),
-                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Center(
-                        child: Container(
-                          width: 40,
-                          height: 5,
-                          decoration: BoxDecoration(
-                            color: isDark ? Colors.white12 : Colors.black12,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Schedules',
-                            style: GoogleFonts.outfit(
-                              fontSize: 24,
-                              fontWeight: FontWeight.w800,
-                              color: textCol,
-                            ),
-                          ),
-                          GestureDetector(
-                            onTap: () {
-                              _showSseInfoDialog(context, isDark);
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 10, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: _mqtt.isSseConnected
-                                    ? Colors.green.withOpacity(0.1)
-                                    : Colors.red.withOpacity(0.1),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                  color: _mqtt.isSseConnected
-                                      ? Colors.green.withOpacity(0.3)
-                                      : Colors.red.withOpacity(0.3),
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Container(
-                                    width: 7,
-                                    height: 7,
-                                    decoration: BoxDecoration(
-                                      color: _mqtt.isSseConnected
-                                          ? Colors.green
-                                          : Colors.red,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    _mqtt.isSseConnected ? 'Live' : 'Offline',
-                                    style: GoogleFonts.inter(
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                      color: _mqtt.isSseConnected
-                                          ? Colors.green
-                                          : Colors.red,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      // SSE Stream Status Banner
-                      if (_mqtt.sseLastDataTime != null) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 10),
-                          decoration: BoxDecoration(
-                            color: isDark
-                                ? Colors.white.withOpacity(0.04)
-                                : const Color(0xFFF0F4FF),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: isDark
-                                  ? Colors.white.withOpacity(0.08)
-                                  : const Color(0xFFD0DBFF),
-                            ),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.sensors_rounded,
-                                size: 16,
-                                color: _mqtt.isSseConnected
-                                    ? AppColors.primary
-                                    : (isDark
-                                        ? Colors.white30
-                                        : Colors.black26),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  'Last sync: ${_formatLastSeen(_mqtt.sseLastDataTime!)}',
-                                  style: GoogleFonts.inter(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w500,
-                                    color: isDark
-                                        ? Colors.white54
-                                        : Colors.black45,
-                                  ),
-                                ),
-                              ),
-                              GestureDetector(
-                                onTap: () {
-                                  if (!_isControlAvailable ||
-                                      (!_isActive && !_mqtt.isBluetoothConnected)) {
-                                    _showSnack(
-                                        'Device is offline. Connect to Wi-Fi to refresh schedules.',
-                                        AppColors.offline,
-                                        icon: Icons.wifi_off_rounded);
-                                    return;
-                                  }
-                                  _mqtt.getScheduleStatus(
-                                      targetDeviceId: _effectiveDeviceId);
-                                  _showSnack('Refreshing schedules...',
-                                      AppColors.primary);
-                                },
-                                child: Container(
-                                  padding: const EdgeInsets.all(4),
-                                  child: Icon(
-                                    Icons.refresh_rounded,
-                                    size: 16,
-                                    color: isDark
-                                        ? Colors.white38
-                                        : Colors.black38,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 16),
-                      // Custom Tab Selector
-                      Container(
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: isDark
-                              ? Colors.white.withOpacity(0.05)
-                              : const Color(0xFFF1F5F9),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: GestureDetector(
-                                onTap: () {
-                                  setModalState(() {
-                                    activeTab = 0;
-                                  });
-                                },
-                                child: Container(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: activeTab == 0
-                                        ? (isDark
-                                            ? AppColors.surfaceDark
-                                            : Colors.white)
-                                        : Colors.transparent,
-                                    borderRadius: BorderRadius.circular(10),
-                                    boxShadow: activeTab == 0
-                                        ? [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.05),
-                                              blurRadius: 4,
-                                              offset: const Offset(0, 2),
-                                            )
-                                          ]
-                                        : [],
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      'Daily Schedule',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        fontWeight: activeTab == 0
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                        color: activeTab == 0
-                                            ? textCol
-                                            : subtextCol,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: GestureDetector(
-                                onTap: () {
-                                  setModalState(() {
-                                    activeTab = 1;
-                                  });
-                                },
-                                child: Container(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: activeTab == 1
-                                        ? (isDark
-                                            ? AppColors.surfaceDark
-                                            : Colors.white)
-                                        : Colors.transparent,
-                                    borderRadius: BorderRadius.circular(10),
-                                    boxShadow: activeTab == 1
-                                        ? [
-                                            BoxShadow(
-                                              color: Colors.black
-                                                  .withOpacity(0.05),
-                                              blurRadius: 4,
-                                              offset: const Offset(0, 2),
-                                            )
-                                          ]
-                                        : [],
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      'Lunch Period',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        fontWeight: activeTab == 1
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                        color: activeTab == 1
-                                            ? textCol
-                                            : subtextCol,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Expanded(
-                          child: activeTab == 0
-                              ? ListView.builder(
-                                  physics: const BouncingScrollPhysics(),
-                                  itemCount: 5,
-                                  itemBuilder: (context, idx) {
-                                    final int slot = idx + 1;
-                                    String schOn;
-                                    String schOff;
-                                    String? schDays;
-                                    if (slot == 1) {
-                                      schOn = schOn1;
-                                      schOff = schOff1;
-                                      schDays = state?.schDays1;
-                                    } else if (slot == 2) {
-                                      schOn = schOn2;
-                                      schOff = schOff2;
-                                      schDays = state?.schDays2;
-                                    } else if (slot == 3) {
-                                      schOn = schOn3;
-                                      schOff = schOff3;
-                                      schDays = state?.schDays3;
-                                    } else if (slot == 4) {
-                                      schOn = schOn4;
-                                      schOff = schOff4;
-                                      schDays = state?.schDays4;
-                                    } else {
-                                      schOn = schOn5;
-                                      schOff = schOff5;
-                                      schDays = state?.schDays5;
-                                    }
-
-                                    final overrideTime =
-                                        _userSchOverrideTime[slot];
-                                    final bool isOverrideActive =
-                                        overrideTime != null &&
-                                            DateTime.now()
-                                                    .difference(overrideTime)
-                                                    .inSeconds <
-                                                60;
-
-                                    String defRawOn = '08:00';
-                                    String defRawOff = '13:00';
-
-                                    if (slot == 2) {
-                                      defRawOn = '18:00';
-                                      defRawOff = '23:00';
-                                    } else if (slot == 3) {
-                                      defRawOn = '09:00';
-                                      defRawOff = '17:00';
-                                    } else if (slot == 4) {
-                                      defRawOn = '07:00';
-                                      defRawOff = '15:00';
-                                    } else if (slot == 5) {
-                                      defRawOn = '10:00';
-                                      defRawOff = '19:00';
-                                    }
-
-                                    final String rawOnTime =
-                                        (isOverrideActive &&
-                                                _savedSchOn[slot] != null)
-                                            ? _savedSchOn[slot]!
-                                            : (_savedSchOn[slot] ??
-                                                (schOn != 'DISABLED' &&
-                                                        schOn.isNotEmpty &&
-                                                        schOn != '--:--'
-                                                    ? schOn
-                                                    : defRawOn));
-                                    final String rawOffTime =
-                                        (isOverrideActive &&
-                                                _savedSchOff[slot] != null)
-                                            ? _savedSchOff[slot]!
-                                            : (_savedSchOff[slot] ??
-                                                (schOff != 'DISABLED' &&
-                                                        schOff.isNotEmpty &&
-                                                        schOff != '--:--'
-                                                    ? schOff
-                                                    : defRawOff));
-
-                                    final bool isSlotActive =
-                                        _schEnabled[slot] ??
-                                            (_schSwitchOverrides[slot] ??
-                                                ((schOn != 'DISABLED' &&
-                                                        schOn.isNotEmpty &&
-                                                        schOn != '--:--') ||
-                                                    (schOff != 'DISABLED' &&
-                                                        schOff.isNotEmpty &&
-                                                        schOff != '--:--')));
-
-                                    final String onTimeDisplay =
-                                        _formatTo12Hour(rawOnTime);
-                                    final String offTimeDisplay =
-                                        _formatTo12Hour(rawOffTime);
-
-                                    return Container(
-                                      margin: const EdgeInsets.only(bottom: 16),
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 18, vertical: 16),
-                                      decoration: BoxDecoration(
-                                        color: cardBg,
-                                        borderRadius: BorderRadius.circular(16),
-                                        border: Border.all(
-                                          color: isDark
-                                              ? AppColors.dividerDark
-                                              : Colors.transparent,
-                                        ),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          // Slot Title and Master Switch
-                                          Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                'Schedule Slot $slot',
-                                                style: GoogleFonts.outfit(
-                                                  fontSize: 16,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: textCol,
-                                                ),
-                                              ),
-                                              Switch(
-                                                value: isSlotActive,
-                                                activeColor: AppColors.primary,
-                                                onChanged: (val) {
-                                                  if (!_isControlAvailable ||
-                                                      (!_isActive &&
-                                                          !_mqtt
-                                                              .isBluetoothConnected)) {
-                                                    _showSnack(
-                                                        'Device is offline. Connect to Wi-Fi to change schedules.',
-                                                        AppColors.offline,
-                                                        icon: Icons.wifi_off_rounded);
-                                                    return;
-                                                  }
-                                                  _userSchOverrideTime[slot] =
-                                                      DateTime.now();
-                                                  final daysToSend = _savedSchDays[
-                                                          slot] ??
-                                                      ((schDays != null &&
-                                                              schDays !=
-                                                                  'DISABLED' &&
-                                                              schDays
-                                                                  .isNotEmpty)
-                                                          ? schDays
-                                                          : 'ALL');
-                                                  _savedSchDays[slot] =
-                                                      daysToSend;
-                                                  _savedSchOn[slot] = rawOnTime;
-                                                  _savedSchOff[slot] =
-                                                      rawOffTime;
-                                                  _schEnabled[slot] = val;
-                                                  setModalState(() {
-                                                    _schSwitchOverrides[slot] =
-                                                        val;
-                                                  });
-                                                  setState(() {
-                                                    _schSwitchOverrides[slot] =
-                                                        val;
-                                                  });
-                                                  LocalCacheService
-                                                      .saveScheduleSlotConfig(
-                                                    _effectiveDeviceId,
-                                                    slot,
-                                                    isEnabled: val,
-                                                    onTime: rawOnTime,
-                                                    offTime: rawOffTime,
-                                                    days: daysToSend,
-                                                  );
-
-                                                  if (val) {
-                                                    _mqtt.setScheduleOn(
-                                                        slot, rawOnTime,
-                                                        days: daysToSend,
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.publishScheduleJson({
-                                                      'on$slot': rawOnTime,
-                                                      'off$slot': rawOffTime,
-                                                      'days$slot': daysToSend,
-                                                    },
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt
-                                                        .updateScheduleOptimistic(
-                                                            slot: slot,
-                                                            onTime: rawOnTime,
-                                                            offTime: rawOffTime,
-                                                            days: daysToSend);
-                                                    Future.delayed(
-                                                        const Duration(
-                                                            milliseconds: 400),
-                                                        () {
-                                                      _mqtt.setScheduleOff(
-                                                          slot, rawOffTime,
-                                                          days: daysToSend,
-                                                          targetDeviceId:
-                                                              _effectiveDeviceId);
-                                                      _mqtt
-                                                          .updateScheduleOptimistic(
-                                                              slot: slot,
-                                                              onTime: rawOnTime,
-                                                              offTime:
-                                                                  rawOffTime,
-                                                              days: daysToSend);
-                                                    });
-                                                  } else {
-                                                    _mqtt.clearScheduleSlot(
-                                                        slot,
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.publishScheduleJson({
-                                                      'on$slot': 'DISABLED',
-                                                      'off$slot': 'DISABLED',
-                                                    },
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt
-                                                        .updateScheduleOptimistic(
-                                                            slot: slot,
-                                                            clear: true);
-                                                  }
-                                                  Future.delayed(
-                                                      const Duration(
-                                                          milliseconds: 1500),
-                                                      () {
-                                                    _mqtt.getScheduleStatus(
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                  });
-                                                  Future.delayed(
-                                                      const Duration(
-                                                          milliseconds: 4000),
-                                                      () {
-                                                    _mqtt.getScheduleStatus(
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                  });
-                                                },
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 12),
-
-                                          // ON and OFF Times Side-by-Side
-                                          Row(
-                                            children: [
-                                              // ON Time block
-                                              Expanded(
-                                                child: GestureDetector(
-                                                  behavior:
-                                                      HitTestBehavior.opaque,
-                                                  onTap: () {
-                                                    _showEditScheduleDialog(
-                                                      context,
-                                                      slot,
-                                                      'ON',
-                                                      onTimeDisplay,
-                                                      isDark,
-                                                      setModalState,
-                                                    );
-                                                  },
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        'ON Time',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 11,
-                                                          color: subtextCol,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 4),
-                                                      Text(
-                                                        onTimeDisplay,
-                                                        style:
-                                                            GoogleFonts.outfit(
-                                                          fontSize: 18,
-                                                          fontWeight:
-                                                              FontWeight.w800,
-                                                          color: isSlotActive
-                                                              ? textCol
-                                                              : textCol
-                                                                  .withOpacity(
-                                                                      0.4),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                              // Divider
-                                              Container(
-                                                height: 30,
-                                                width: 1,
-                                                color: isDark
-                                                    ? Colors.white10
-                                                    : Colors.black12,
-                                                margin:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 16),
-                                              ),
-                                              // OFF Time block
-                                              Expanded(
-                                                child: GestureDetector(
-                                                  behavior:
-                                                      HitTestBehavior.opaque,
-                                                  onTap: () {
-                                                    _showEditScheduleDialog(
-                                                      context,
-                                                      slot,
-                                                      'OFF',
-                                                      offTimeDisplay,
-                                                      isDark,
-                                                      setModalState,
-                                                    );
-                                                  },
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        'OFF Time',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 11,
-                                                          color: subtextCol,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 4),
-                                                      Text(
-                                                        offTimeDisplay,
-                                                        style:
-                                                            GoogleFonts.outfit(
-                                                          fontSize: 18,
-                                                          fontWeight:
-                                                              FontWeight.w800,
-                                                          color: isSlotActive
-                                                              ? textCol
-                                                              : textCol
-                                                                  .withOpacity(
-                                                                      0.4),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          _buildWeeklyDaysSelector(
-                                            slot: slot,
-                                            isEnabled: isSlotActive,
-                                            isDark: isDark,
-                                            setModalState: setModalState,
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  },
-                                )
-                              : SingleChildScrollView(
-                                  physics: const BouncingScrollPhysics(),
-                                  child: Container(
-                                    padding: const EdgeInsets.all(18),
-                                    decoration: BoxDecoration(
-                                      color: cardBg,
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                        color: isDark
-                                            ? AppColors.dividerDark
-                                            : Colors.transparent,
-                                      ),
-                                    ),
-                                    child: () {
-                                      final lunchOverrideTime =
-                                          _userSchOverrideTime[0];
-                                      final bool isLunchOverrideActive =
-                                          lunchOverrideTime != null &&
-                                              DateTime.now()
-                                                      .difference(
-                                                          lunchOverrideTime)
-                                                      .inSeconds <
-                                                  60;
-
-                                      final String rawLunchOn =
-                                          (isLunchOverrideActive &&
-                                                  _savedSchOn[0] != null)
-                                              ? _savedSchOn[0]!
-                                              : (_savedSchOn[0] ??
-                                                  (schOnLunch != 'DISABLED' &&
-                                                          schOnLunch
-                                                              .isNotEmpty &&
-                                                          schOnLunch != '--:--'
-                                                      ? schOnLunch
-                                                      : '12:00'));
-                                      final String rawLunchOff =
-                                          (isLunchOverrideActive &&
-                                                  _savedSchOff[0] != null)
-                                              ? _savedSchOff[0]!
-                                              : (_savedSchOff[0] ??
-                                                  (schOffLunch != 'DISABLED' &&
-                                                          schOffLunch
-                                                              .isNotEmpty &&
-                                                          schOffLunch != '--:--'
-                                                      ? schOffLunch
-                                                      : '13:00'));
-
-                                      final bool isLunchActive =
-                                          _schEnabled[0] ??
-                                              (_schSwitchOverrides[0] ??
-                                                  (schOnLunch != 'DISABLED' ||
-                                                      schOffLunch !=
-                                                          'DISABLED'));
-
-                                      final String lunchOnDisplay =
-                                          _formatTo12Hour(rawLunchOn);
-                                      final String lunchOffDisplay =
-                                          _formatTo12Hour(rawLunchOff);
-
-                                      return Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          // Lunch Title and Switch
-                                          Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Text(
-                                                'Lunch Period',
-                                                style: GoogleFonts.outfit(
-                                                  fontSize: 16,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: textCol,
-                                                ),
-                                              ),
-                                              Switch(
-                                                value: isLunchActive,
-                                                activeColor: AppColors.primary,
-                                                onChanged: (val) {
-                                                  if (!_isControlAvailable ||
-                                                      (!_isActive &&
-                                                          !_mqtt
-                                                              .isBluetoothConnected)) {
-                                                    _showSnack(
-                                                        'Device is offline. Connect to Wi-Fi to change schedules.',
-                                                        AppColors.offline,
-                                                        icon: Icons.wifi_off_rounded);
-                                                    return;
-                                                  }
-                                                  _userSchOverrideTime[0] =
-                                                      DateTime.now();
-                                                  final lunchDaysToSend =
-                                                      _savedSchDays[0] ?? 'ALL';
-                                                  _savedSchDays[0] =
-                                                      lunchDaysToSend;
-                                                  _savedSchOn[0] = rawLunchOn;
-                                                  _savedSchOff[0] = rawLunchOff;
-                                                  _schEnabled[0] = val;
-                                                  setModalState(() {
-                                                    _schSwitchOverrides[0] =
-                                                        val;
-                                                  });
-                                                  setState(() {
-                                                    _schSwitchOverrides[0] =
-                                                        val;
-                                                  });
-                                                  LocalCacheService
-                                                      .saveScheduleSlotConfig(
-                                                    _effectiveDeviceId,
-                                                    0,
-                                                    isEnabled: val,
-                                                    onTime: rawLunchOn,
-                                                    offTime: rawLunchOff,
-                                                    days: lunchDaysToSend,
-                                                  );
-
-                                                  if (val) {
-                                                    _mqtt.setLunchOn(rawLunchOn,
-                                                        days: lunchDaysToSend,
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.publishScheduleJson({
-                                                      'lunch_on': rawLunchOn,
-                                                      'lunch_off': rawLunchOff,
-                                                      'lunch_days':
-                                                          lunchDaysToSend,
-                                                    },
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.updateLunchOptimistic(
-                                                        lunchOn: rawLunchOn,
-                                                        lunchOff: rawLunchOff,
-                                                        days: lunchDaysToSend);
-                                                    Future.delayed(
-                                                        const Duration(
-                                                            milliseconds: 400),
-                                                        () {
-                                                      _mqtt.setLunchOff(
-                                                          rawLunchOff,
-                                                          days: lunchDaysToSend,
-                                                          targetDeviceId:
-                                                              _effectiveDeviceId);
-                                                      _mqtt.updateLunchOptimistic(
-                                                          lunchOn: rawLunchOn,
-                                                          lunchOff: rawLunchOff,
-                                                          days:
-                                                              lunchDaysToSend);
-                                                    });
-                                                  } else {
-                                                    _mqtt.clearLunchSlot(
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.publishScheduleJson({
-                                                      'lunch_on': 'DISABLED',
-                                                      'lunch_off': 'DISABLED',
-                                                    },
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                    _mqtt.updateLunchOptimistic(
-                                                        clear: true);
-                                                  }
-                                                  _showSnack(
-                                                      val
-                                                          ? 'Lunch Period enabled'
-                                                          : 'Lunch Period cleared',
-                                                      val
-                                                          ? AppColors.online
-                                                          : AppColors.warning);
-                                                  Future.delayed(
-                                                      const Duration(
-                                                          milliseconds: 1500),
-                                                      () {
-                                                    _mqtt.getScheduleStatus(
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                  });
-                                                  Future.delayed(
-                                                      const Duration(
-                                                          milliseconds: 4000),
-                                                      () {
-                                                    _mqtt.getScheduleStatus(
-                                                        targetDeviceId:
-                                                            _effectiveDeviceId);
-                                                  });
-                                                },
-                                              ),
-                                            ],
-                                          ),
-                                          const SizedBox(height: 12),
-
-                                          // ON and OFF Times Side-by-Side
-                                          Row(
-                                            children: [
-                                              // ON Time block
-                                              Expanded(
-                                                child: GestureDetector(
-                                                  behavior:
-                                                      HitTestBehavior.opaque,
-                                                  onTap: () {
-                                                    _showEditScheduleDialog(
-                                                      context,
-                                                      0,
-                                                      'ON',
-                                                      lunchOnDisplay,
-                                                      isDark,
-                                                      setModalState,
-                                                    );
-                                                  },
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        'ON Time',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 11,
-                                                          color: subtextCol,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 4),
-                                                      Text(
-                                                        lunchOnDisplay,
-                                                        style:
-                                                            GoogleFonts.outfit(
-                                                          fontSize: 18,
-                                                          fontWeight:
-                                                              FontWeight.w800,
-                                                          color: isLunchActive
-                                                              ? textCol
-                                                              : textCol
-                                                                  .withOpacity(
-                                                                      0.4),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                              // Divider
-                                              Container(
-                                                height: 30,
-                                                width: 1,
-                                                color: isDark
-                                                    ? Colors.white10
-                                                    : Colors.black12,
-                                                margin:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 16),
-                                              ),
-                                              // OFF Time block
-                                              Expanded(
-                                                child: GestureDetector(
-                                                  behavior:
-                                                      HitTestBehavior.opaque,
-                                                  onTap: () {
-                                                    _showEditScheduleDialog(
-                                                      context,
-                                                      0,
-                                                      'OFF',
-                                                      lunchOffDisplay,
-                                                      isDark,
-                                                      setModalState,
-                                                    );
-                                                  },
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment
-                                                            .start,
-                                                    children: [
-                                                      Text(
-                                                        'OFF Time',
-                                                        style:
-                                                            GoogleFonts.inter(
-                                                          fontSize: 11,
-                                                          color: subtextCol,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                        ),
-                                                      ),
-                                                      const SizedBox(height: 4),
-                                                      Text(
-                                                        lunchOffDisplay,
-                                                        style:
-                                                            GoogleFonts.outfit(
-                                                          fontSize: 18,
-                                                          fontWeight:
-                                                              FontWeight.w800,
-                                                          color: isLunchActive
-                                                              ? textCol
-                                                              : textCol
-                                                                  .withOpacity(
-                                                                      0.4),
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          _buildWeeklyDaysSelector(
-                                            slot: 0,
-                                            isEnabled: isLunchActive,
-                                            isDark: isDark,
-                                            setModalState: setModalState,
-                                          ),
-                                        ],
-                                      );
-                                    }(),
-                                  ),
-                                )),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
+    return buildWeeklyDaysSelector(
+      slot: slot,
+      currentDays: rawDays,
+      isEnabled: isEnabled,
+      isDark: isDark,
+      isControlAvailable: _isControlAvailable,
+      isActive: _isActive,
+      isBluetoothConnected: _mqtt.isBluetoothConnected,
+      effectiveDeviceId: _effectiveDeviceId,
+      mqtt: _mqtt,
+      setModalState: setModalState,
+      onDaysChanged: (s, formattedDays) {
+        _userSchOverrideTime[s] = DateTime.now();
+        setModalState(() {
+          _savedSchDays[s] = formattedDays;
+        });
+        setState(() {
+          _savedSchDays[s] = formattedDays;
+        });
       },
-    );
-  }
-
-  Widget _timerOption(BuildContext context, String label) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () {
-          Navigator.pop(context);
-          _showSnack('Auto-off timer set for $label', AppColors.primary);
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          decoration: BoxDecoration(
-            color: isDark ? AppColors.backgroundDark : Colors.grey[100],
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isDark ? AppColors.dividerDark : Colors.transparent,
-            ),
-          ),
-          child: Center(
-            child: Text(
-              label,
-              style: GoogleFonts.inter(
-                fontWeight: FontWeight.w600,
-                fontSize: 13,
-                color: isDark ? Colors.white70 : AppColors.textPrimary,
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showGraphsLogsDialog(BuildContext context, bool isDark) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (BuildContext context) {
-        return Container(
-          height: MediaQuery.of(context).size.height * 0.45,
-          decoration: BoxDecoration(
-            color: isDark ? AppColors.surfaceDark : Colors.white,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Device Log & Activity',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      color: isDark ? Colors.white : AppColors.textPrimary,
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Icon(Icons.close_rounded,
-                        color: isDark ? Colors.white30 : Colors.black26),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: _activityLogs.isEmpty
-                    ? Center(
-                        child: Text(
-                          'No activities recorded yet',
-                          style: GoogleFonts.inter(
-                            color: isDark ? Colors.white30 : Colors.black26,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        physics: const BouncingScrollPhysics(),
-                        itemCount: _activityLogs.length,
-                        itemBuilder: (context, index) {
-                          final log = _activityLogs[index];
-                          return _buildLogItem(
-                            log['message'].toString(),
-                            log['time'].toString(),
-                            log['color'] as Color,
-                            isDark,
-                          );
-                        },
-                      ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildLogItem(String title, String time, Color color, bool isDark) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: isDark ? AppColors.backgroundDark : Colors.grey[50],
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-            color: isDark ? AppColors.dividerDark : Colors.grey[200]!),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                title,
-                style: GoogleFonts.inter(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: isDark
-                      ? Colors.white.withOpacity(0.9)
-                      : AppColors.textPrimary,
-                ),
-              ),
-            ],
-          ),
-          Text(
-            time,
-            style: GoogleFonts.inter(
-              fontSize: 11,
-              color: isDark ? Colors.white38 : Colors.black38,
-            ),
-          ),
-        ],
-      ),
+      showSnack: _showSnack,
     );
   }
 
@@ -3720,15 +2261,17 @@ class _ACControlPageState extends State<ACControlPage>
       if (id.isNotEmpty && !seenIds.contains(id)) {
         seenIds.add(id);
         final String name = equip['name']?.toString() ?? 'AC Unit';
-        final String shortId = (equip['shortId'] ??
-                equip['ShortId'] ??
-                equip['imei'] ??
+        final String imei = (equip['imei'] ??
                 equip['Imei'] ??
+                equip['deviceId'] ??
+                equip['DeviceId'] ??
+                equip['device_id'] ??
                 '')
-            .toString();
+            .toString()
+            .trim();
         final String display =
-            (shortId.isNotEmpty && shortId.toLowerCase() != name.toLowerCase())
-                ? '$name ($shortId)'
+            imei.isNotEmpty && imei.toLowerCase() != name.toLowerCase()
+                ? '$name ($imei)'
                 : name;
 
         final bool isOnline = equip['isOnline'] == true ||
@@ -3741,7 +2284,7 @@ class _ACControlPageState extends State<ACControlPage>
         equipmentList.add({
           'id': id,
           'name': name,
-          'shortId': shortId,
+          'imei': imei,
           'display': display,
           'isOnline': isOnline.toString(),
         });
@@ -3821,11 +2364,7 @@ class _ACControlPageState extends State<ACControlPage>
         title: _equipmentsData.length <= 1
             ? Text(
                 _selectedEquipmentName.isNotEmpty
-                    ? (_selectedEquipmentShortId.isNotEmpty &&
-                            _selectedEquipmentShortId.toLowerCase() !=
-                                _selectedEquipmentName.toLowerCase()
-                        ? '$_selectedEquipmentName ($_selectedEquipmentShortId)'
-                        : _selectedEquipmentName)
+                    ? _selectedEquipmentName
                     : 'Smart IR Blaster',
                 style: GoogleFonts.outfit(
                   color: Colors.white,
@@ -3878,23 +2417,20 @@ class _ACControlPageState extends State<ACControlPage>
                     items: dropdownItems,
                     onChanged: (val) {
                       if (val != null) {
-                        final selected = _equipmentsData.firstWhere((e) =>
-                            (e['id'] ??
-                                    e['Id'] ??
-                                    e['equipmentId'] ??
-                                    e['EquipmentId'] ??
-                                    '')
-                                .toString() ==
-                            val);
+                        Map<String, dynamic>? selected;
+                        try {
+                          selected = _equipmentsData.firstWhere((e) =>
+                              (e['id'] ??
+                                      e['Id'] ??
+                                      e['equipmentId'] ??
+                                      e['EquipmentId'] ??
+                                      '')
+                                  .toString() ==
+                              val);
+                        } catch (_) {}
                         _onEquipmentSelected(
                           val,
-                          selected['name']?.toString() ?? 'AC Unit',
-                          (selected['imei'] ??
-                                  selected['Imei'] ??
-                                  selected['shortId'] ??
-                                  selected['ShortId'] ??
-                                  '')
-                              .toString(),
+                          selected?['name']?.toString() ?? 'AC Unit',
                         );
                       }
                     },
@@ -3906,10 +2442,15 @@ class _ACControlPageState extends State<ACControlPage>
           IconButton(
             icon: const Icon(Icons.refresh_rounded, color: Colors.white),
             tooltip: 'Reload Device Status',
-            onPressed: () {
-              _mqtt.sendStatus(targetDeviceId: _effectiveDeviceId);
-              _fetchEquipments();
-              _showSnack('Reloading equipment status...', AppColors.primary,
+            onPressed: () async {
+              _mqtt.sendStatus(
+                targetDeviceId: _effectiveDeviceId,
+                targetDeviceImei:
+                    _activeDeviceImei.isNotEmpty ? _activeDeviceImei : null,
+              );
+              await _fetchEquipments();
+              await _fetchStatusViaApi();
+              _showSnack('Reloaded equipment status', AppColors.primary,
                   icon: Icons.refresh_rounded);
             },
           ),
@@ -3963,8 +2504,6 @@ class _ACControlPageState extends State<ACControlPage>
                   final double cardSpacing = screenHeight > 750 ? 16.0 : 10.0;
                   final double innerPadding = screenHeight > 750 ? 20.0 : 14.0;
 
-                  final isBluetooth = _mqtt.isBluetoothConnected;
-                  final isDeviceOnline = _isActive || isBluetooth;
 
                   Widget content = Padding(
                     padding: EdgeInsets.symmetric(
@@ -3995,1327 +2534,10 @@ class _ACControlPageState extends State<ACControlPage>
                     ),
                   );
 
-                  if (!isDeviceOnline) {
-                    return Stack(
-                      children: [
-                        ImageFiltered(
-                          imageFilter:
-                              ImageFilter.blur(sigmaX: 5.5, sigmaY: 5.5),
-                          child: Container(
-                            color: Colors.transparent,
-                            child: IgnorePointer(child: content),
-                          ),
-                        ),
-                        _buildBlurOverlay(isDark),
-                      ],
-                    );
-                  }
-
                   return content;
                 },
               ),
       ),
     );
   }
-
-  Widget _buildBlurOverlay(bool isDark) {
-    return Container(
-      decoration: BoxDecoration(
-        color: (isDark ? Colors.black : Colors.white).withOpacity(0.35),
-        borderRadius: BorderRadius.circular(24),
-      ),
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.red.withOpacity(0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.signal_wifi_off_rounded,
-                  color: Colors.redAccent,
-                  size: 48,
-                ),
-              ),
-              const SizedBox(height: 20),
-              Text(
-                'Device is Offline',
-                style: GoogleFonts.outfit(
-                  fontSize: 22,
-                  fontWeight: FontWeight.bold,
-                  color: isDark ? Colors.white : Colors.black87,
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'The IR Blaster is disconnected from WiFi.\nPlease check your connection.',
-                textAlign: TextAlign.center,
-                style: GoogleFonts.inter(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                  color: isDark ? Colors.white70 : Colors.black54,
-                  height: 1.4,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ── Widgets ──
-
-  Widget _buildDeviceInfoCard(
-      Color cardColor, Color textColor, Color subtitleColor, bool isDark) {
-    final statusColor = _isPowerOn ? AppColors.online : AppColors.offline;
-    final statusText = _isPowerOn ? 'On' : 'Off';
-    final tempText =
-        _currentTemp == 0 ? '--.-°' : '${_currentTemp.toStringAsFixed(1)}°';
-    final humText = _humidity == 0 ? '--%' : '${_humidity.toStringAsFixed(1)}%';
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-            color: isDark ? AppColors.dividerDark : AppColors.divider),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(isDark ? 0.2 : 0.03),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: statusColor,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Status: $statusText',
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: textColor,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    tempText,
-                    style: GoogleFonts.outfit(
-                      fontSize: 32,
-                      fontWeight: FontWeight.w800,
-                      color: textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.water_drop_rounded,
-                        color: AppColors.coolBlue,
-                        size: 14,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        humText,
-                        style: GoogleFonts.inter(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: subtitleColor,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Divider(
-              color: isDark ? AppColors.dividerDark : AppColors.divider,
-              height: 1),
-          const SizedBox(height: 12),
-          _buildConnectivityRow(isDark),
-        ],
-      ),
-    );
-  }
-
-  void _openWifiManagementDialog() {
-    String? foundMac;
-    try {
-      final match = _equipmentsData.firstWhere(
-        (e) =>
-            (e['id'] ?? e['Id'] ?? e['equipmentId'] ?? e['EquipmentId'] ?? '')
-                .toString() ==
-            _selectedEquipmentId,
-      );
-      foundMac = (match['mac'] ??
-              match['wifiMac'] ??
-              match['Mac'] ??
-              match['imei'] ??
-              match['Imei'])
-          ?.toString();
-    } catch (_) {}
-
-    showDialog(
-      context: context,
-      builder: (ctx) => WifiManagementDialog(
-        mqtt: _mqtt,
-        initialSsid: _mqtt.lastState?.primarySsid ?? '',
-        deviceId:
-            _activeDeviceId.isNotEmpty ? _activeDeviceId : _selectedEquipmentId,
-        initialMac: foundMac,
-        targetDeviceName: _selectedEquipmentName,
-        isIndividualEquipment: true,
-      ),
-    ).then((_) {
-      if (mounted) setState(() {});
-    });
-  }
-
-  Widget _buildConnectivityRow(bool isDark) {
-    final isBluetooth = _mqtt.isBluetoothConnected;
-    final isDeviceOnline = _isActive || isBluetooth;
-    final dotColor = isDeviceOnline ? AppColors.online : AppColors.offline;
-    final connText = isBluetooth
-        ? 'Bluetooth Connected'
-        : (isDeviceOnline ? 'Connected' : 'OFFLINE');
-    final iconData = isBluetooth ? Icons.bluetooth : Icons.wifi;
-    final iconColor = isBluetooth
-        ? Colors.blue
-        : (isDeviceOnline ? AppColors.online : AppColors.offline);
-
-    return GestureDetector(
-      onTap: _openWifiManagementDialog,
-      behavior: HitTestBehavior.opaque,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(iconData, color: iconColor, size: 22),
-          const SizedBox(width: 8),
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            connText,
-            style: GoogleFonts.inter(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: isDark ? Colors.white : Colors.black87,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Icon(
-            Icons.chevron_right_rounded,
-            size: 18,
-            color: isDark ? Colors.white38 : Colors.black38,
-          ),
-          if (!isDeviceOnline) ...[
-            const SizedBox(width: 4),
-            Text(
-              '(Tap for WiFi/BT)',
-              style: GoogleFonts.inter(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: Colors.blueAccent,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAirQualityMetrics(
-      Color cardColor, Color textColor, Color subtitleColor, bool isDark) {
-    return Row(
-      children: [
-        _buildAirMetricCard(
-          icon: Icons.co2_rounded,
-          title: 'CO₂',
-          value: '$_co2 ppm',
-          accentColor: const Color(0xFFD97706),
-          bgLight: const Color(0xFFFFFBEB),
-          bgDark: const Color(0xFF78350F),
-          borderLight: const Color(0xFFFEF3C7),
-          borderDark: const Color(0xFFB45309),
-          activeSegments: 4,
-          isDark: isDark,
-        ),
-        const SizedBox(width: 12),
-        _buildAirMetricCard(
-          icon: Icons.eco_rounded,
-          title: 'AQI',
-          value: '$_aqi',
-          accentColor: const Color(0xFF65A30D),
-          bgLight: const Color(0xFFF7FEE7),
-          bgDark: const Color(0xFF3F6212),
-          borderLight: const Color(0xFFECFCCB),
-          borderDark: const Color(0xFF4D7C0F),
-          activeSegments: 3,
-          isDark: isDark,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAirMetricCard({
-    required IconData icon,
-    required String title,
-    required String value,
-    required Color accentColor,
-    required Color bgLight,
-    required Color bgDark,
-    required Color borderLight,
-    required Color borderDark,
-    required int activeSegments,
-    required bool isDark,
-  }) {
-    final bg = isDark ? bgDark.withOpacity(0.15) : bgLight;
-    final borderCol = isDark ? borderDark.withOpacity(0.4) : borderLight;
-
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: borderCol, width: 1),
-        ),
-        child: Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: accentColor, size: 16),
-                const SizedBox(width: 4),
-                Text(
-                  title,
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: isDark ? Colors.white38 : Colors.black45,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              value,
-              style: GoogleFonts.outfit(
-                fontSize: 17,
-                fontWeight: FontWeight.w800,
-                color: isDark ? Colors.white : AppColors.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: List.generate(
-                  5,
-                  (index) => Container(
-                        width: 12,
-                        height: 3,
-                        margin: const EdgeInsets.symmetric(horizontal: 1.5),
-                        decoration: BoxDecoration(
-                          color: index < activeSegments
-                              ? accentColor
-                              : accentColor.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      )),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCurrentModeBanner(Color textColor) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const Icon(Icons.ac_unit_rounded, color: AppColors.coolBlue, size: 16),
-        const SizedBox(width: 6),
-        Text(
-          _mode,
-          style: GoogleFonts.inter(
-            color: textColor.withOpacity(0.7),
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(width: 20),
-        RotationTransition(
-          turns: _fanRotationCtrl,
-          child: Image.asset(
-            'assets/images/fan.png',
-            width: 16,
-            height: 16,
-            color: AppColors.textSecondary,
-          ),
-        ),
-        const SizedBox(width: 6),
-        Text(
-          _fanSpeed,
-          style: GoogleFonts.inter(
-            color: textColor.withOpacity(0.7),
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTemperatureDialRow(Color textColor, bool isDark) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        _buildDialButton(Icons.remove, _decrementTemp, textColor, isDark),
-        const SizedBox(width: 20),
-        _buildTempDial(textColor, isDark),
-        const SizedBox(width: 20),
-        _buildDialButton(Icons.add, _incrementTemp, textColor, isDark),
-      ],
-    );
-  }
-
-  Widget _buildTempDial(Color textColor, bool isDark) {
-    final color = _isPowerOn ? AppColors.coolBlue : AppColors.textHint;
-    return GestureDetector(
-      onTap: _togglePower,
-      child: SizedBox(
-        width: 170,
-        height: 170,
-        child: AnimatedBuilder(
-          animation: _pulseCtrl,
-          builder: (context, child) {
-            final double pulseVal = _isPowerOn ? _pulseCtrl.value : 0.0;
-            return Stack(
-              alignment: Alignment.center,
-              clipBehavior: Clip.none,
-              children: [
-                // Outer breathing aura ring (only when ON) - Positioned to prevent affecting layout flow
-                if (_isPowerOn)
-                  Positioned(
-                    width: 170 + (pulseVal * 24),
-                    height: 170 + (pulseVal * 24),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: color.withOpacity(0.25 * (1.0 - pulseVal)),
-                          width: 1.5 + (pulseVal * 2.5),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: color.withOpacity(0.12 * (1.0 - pulseVal)),
-                            blurRadius: 12 + (pulseVal * 12),
-                            spreadRadius: 2 + (pulseVal * 4),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                // Main Dial Container
-                Container(
-                  width: 170,
-                  height: 170,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: isDark ? AppColors.surfaceDark : Colors.white,
-                    border: Border.all(
-                      color: _isPowerOn
-                          ? color.withOpacity(0.15 + pulseVal * 0.15)
-                          : color.withOpacity(0.12),
-                      width: 6,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: color.withOpacity(0.08 + (pulseVal * 0.12)),
-                        blurRadius: 16.0 + (pulseVal * 16.0),
-                        spreadRadius: 2.0 + (pulseVal * 6.0),
-                      ),
-                      BoxShadow(
-                        color: isDark
-                            ? Colors.black38
-                            : Colors.black.withOpacity(0.04),
-                        blurRadius: 10,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: child,
-                ),
-              ],
-            );
-          },
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(
-                '$_setTemp°',
-                style: GoogleFonts.outfit(
-                  fontSize: 56,
-                  fontWeight: FontWeight.w800,
-                  color: textColor,
-                  height: 1.0,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                _isPowerOn ? 'TURN OFF' : 'TURN ON',
-                style: GoogleFonts.outfit(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                  color: _isPowerOn ? AppColors.primary : AppColors.offline,
-                  letterSpacing: 0.8,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDialButton(
-      IconData icon, VoidCallback onTap, Color textColor, bool isDark) {
-    final bool isEnabled = _isControlAvailable;
-    return GestureDetector(
-      onTap: isEnabled ? onTap : null,
-      child: Container(
-        width: 52,
-        height: 52,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: isDark ? AppColors.surfaceDark : Colors.white,
-          border: Border.all(
-              color: isDark ? AppColors.dividerDark : AppColors.divider,
-              width: 1),
-          boxShadow: [
-            BoxShadow(
-              color: isDark ? Colors.black26 : Colors.black.withOpacity(0.04),
-              blurRadius: 8,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Icon(
-          icon,
-          color: isEnabled ? AppColors.primary : AppColors.textHint,
-          size: 22,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActionGrid(Color cardColor, Color textColor, bool isDark) {
-    return Row(
-      children: [
-        _buildActionItem(
-          icon: Icons.ac_unit_rounded,
-          label: 'Mode',
-          value: _mode,
-          activeColor: AppColors.coolBlue,
-          activeBg: const Color(0xFFEFF6FF),
-          isActive: _isPowerOn,
-          onTap: _cycleMode,
-          cardColor: cardColor,
-          textColor: textColor,
-          isDark: isDark,
-        ),
-        const SizedBox(width: 8),
-        _buildActionItem(
-          icon: Icons.mode_fan_off_rounded,
-          label: 'Fan',
-          value: _fanSpeed,
-          activeColor: AppColors.primary,
-          activeBg: const Color(0xFFECFDF5),
-          isActive: _isPowerOn,
-          onTap: _cycleFanSpeed,
-          cardColor: cardColor,
-          textColor: textColor,
-          isDark: isDark,
-          customIcon: RotationTransition(
-            turns: _fanRotationCtrl,
-            child: Image.asset(
-              'assets/images/fan.png',
-              width: 22,
-              height: 22,
-              color: (_isPowerOn && _isControlAvailable)
-                  ? AppColors.primary
-                  : AppColors.textHint,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        _buildActionItem(
-          icon: Icons.lightbulb_rounded,
-          label: 'Light',
-          value: _lightOn ? 'On' : 'Off',
-          activeColor: AppColors.warning,
-          activeBg: const Color(0xFFFEFCE8),
-          isActive: _isPowerOn && _lightOn,
-          onTap: _toggleLight,
-          cardColor: cardColor,
-          textColor: textColor,
-          isDark: isDark,
-        ),
-        const SizedBox(width: 8),
-        _buildActionItem(
-          icon: Icons.swap_vert_rounded,
-          label: 'Swing',
-          value: _swingV ? 'On' : 'Off',
-          activeColor: AppColors.fanPurple,
-          activeBg: const Color(0xFFF5F3FF),
-          isActive: _isPowerOn && _swingV,
-          onTap: _toggleSwingV,
-          cardColor: cardColor,
-          textColor: textColor,
-          isDark: isDark,
-        ),
-        const SizedBox(width: 8),
-        _buildActionItem(
-          icon: Icons.swap_horiz_rounded,
-          label: 'Swing',
-          value: _swingH ? 'On' : 'Off',
-          activeColor: AppColors.fanPurple,
-          activeBg: const Color(0xFFF5F3FF),
-          isActive: _isPowerOn && _swingH,
-          onTap: _toggleSwingH,
-          cardColor: cardColor,
-          textColor: textColor,
-          isDark: isDark,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildActionItem({
-    required IconData icon,
-    required String label,
-    required String value,
-    required Color activeColor,
-    required Color activeBg,
-    required bool isActive,
-    required VoidCallback onTap,
-    required Color cardColor,
-    required Color textColor,
-    required bool isDark,
-    Widget? customIcon,
-  }) {
-    final bool isInteractable = _isControlAvailable && _isPowerOn;
-    final bg = (isActive && isInteractable)
-        ? (isDark ? activeColor.withOpacity(0.12) : activeBg)
-        : cardColor;
-    final borderCol = (isActive && isInteractable)
-        ? activeColor.withOpacity(0.3)
-        : (isDark ? AppColors.dividerDark : AppColors.divider);
-
-    return Expanded(
-      child: GestureDetector(
-        onTap: isInteractable ? onTap : null,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: borderCol, width: 1.2),
-            boxShadow: [
-              if (isActive && isInteractable)
-                BoxShadow(
-                  color: activeColor.withOpacity(isDark ? 0.1 : 0.05),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              customIcon ??
-                  Icon(icon,
-                      color: (isActive && isInteractable)
-                          ? activeColor
-                          : AppColors.textHint,
-                      size: 22),
-              const SizedBox(height: 8),
-              Text(
-                label,
-                style: GoogleFonts.inter(
-                  fontSize: 10,
-                  color: isDark ? Colors.white38 : Colors.black38,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                value,
-                style: GoogleFonts.outfit(
-                  fontSize: 11,
-                  color: (isActive && isInteractable)
-                      ? activeColor
-                      : AppColors.textHint,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBottomQuickActions(Color textColor, bool isDark) {
-    return Row(
-      children: [
-        _buildBottomActionItem(
-          icon:
-              _isAutomated ? Icons.smart_toy_rounded : Icons.smart_toy_outlined,
-          label: _isAutomated ? 'Auto ($_autoTemp°)' : 'Automate',
-          color: _isAutomated ? AppColors.online : AppColors.coolBlue,
-          bg: _isAutomated
-              ? AppColors.online.withOpacity(0.12)
-              : (isDark
-                  ? AppColors.coolBlue.withOpacity(0.12)
-                  : const Color(0xFFEFF6FF)),
-          onTap: () => _showAutomationDialog(context, isDark),
-          isDark: isDark,
-        ),
-        const SizedBox(width: 12),
-        _buildBottomActionItem(
-          icon: Icons.calendar_month_outlined,
-          label: 'Schedule',
-          color: AppColors.primary,
-          bg: isDark
-              ? AppColors.primary.withOpacity(0.12)
-              : const Color(0xFFECFDF5),
-          onTap: () => _showSchedulesSheet(context, isDark),
-          isDark: isDark,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBottomActionItem({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required Color bg,
-    required VoidCallback onTap,
-    required bool isDark,
-  }) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          height: 52,
-          decoration: BoxDecoration(
-            color: bg,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: color.withOpacity(0.2), width: 1),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: color, size: 16),
-              const SizedBox(width: 8),
-              Text(
-                label,
-                style: GoogleFonts.outfit(
-                  color: color,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  void _showAutomationDialog(BuildContext context, bool isDark) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-            return Container(
-              decoration: BoxDecoration(
-                color: isDark ? AppColors.surfaceDark : Colors.white,
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(24)),
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: isDark ? Colors.white24 : Colors.black12,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        'Smart Automation',
-                        style: GoogleFonts.outfit(
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? Colors.white : AppColors.textPrimary,
-                        ),
-                      ),
-                      Switch(
-                        value: _isAutomated,
-                        activeColor: AppColors.primary,
-                        onChanged: (value) async {
-                          if (!_isControlAvailable ||
-                              (!_isActive && !_mqtt.isBluetoothConnected)) {
-                            _showSnack(
-                              'Device is offline. Connect to Wi-Fi to use smart automation.',
-                              AppColors.offline,
-                              icon: Icons.wifi_off_rounded,
-                            );
-                            return;
-                          }
-                          setModalState(() {
-                            _isAutomated = value;
-                          });
-                          setState(() {
-                            _isAutomated = value;
-                          });
-                          _addLog(
-                              'Automation ${value ? 'ENABLED' : 'DISABLED'}',
-                              AppColors.primary);
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setBool('auto_enabled', value);
-                          if (value) {
-                            _mqtt.enableAutomation(
-                                autoTemp: _autoTemp,
-                                targetDeviceId: _effectiveDeviceId);
-                          } else {
-                            _mqtt.disableAutomation(
-                                targetDeviceId: _effectiveDeviceId);
-                          }
-                          _showSnack(
-                            'Smart Automation ${value ? 'Enabled ($_autoTemp°C)' : 'Disabled'}',
-                            value ? AppColors.online : AppColors.offline,
-                          );
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Let the IR Blaster adjust your AC settings intelligently based on room parameters to optimize comfort and save energy.',
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      height: 1.4,
-                      color: isDark ? Colors.white54 : Colors.black54,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Divider(
-                      color:
-                          isDark ? AppColors.dividerDark : AppColors.divider),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Automation Triggers',
-                    style: GoogleFonts.outfit(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? Colors.white70 : AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  _buildTemperatureThresholdTriggerItem(
-                    enabled: _isAutomated,
-                    isDark: isDark,
-                    setModalState: setModalState,
-                  ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? Colors.white.withOpacity(0.03)
-                          : Colors.black.withOpacity(0.03),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(
-                        color: isDark ? Colors.white10 : Colors.black12,
-                        width: 0.8,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline_rounded,
-                          size: 14,
-                          color: isDark ? Colors.white38 : Colors.black38,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Automation threshold is independent from normal AC temperature ($_setTemp°C).',
-                            style: GoogleFonts.inter(
-                              fontSize: 11,
-                              color: isDark ? Colors.white54 : Colors.black54,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _updateAutoTemp(int newTemp, [StateSetter? setModalState]) async {
-    if (newTemp < 16 || newTemp > 30) return;
-    if (setModalState != null) {
-      setModalState(() {
-        _autoTemp = newTemp;
-      });
-    }
-    setState(() {
-      _autoTemp = newTemp;
-    });
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('auto_temp', newTemp);
-
-    _addLog('Smart Automation threshold set to $newTemp°C', AppColors.primary);
-
-    if (_isAutomated) {
-      if (!_isControlAvailable || (!_isActive && !_mqtt.isBluetoothConnected)) {
-        _showSnack(
-          'Device offline. Saved threshold $newTemp°C will apply when online.',
-          AppColors.offline,
-          icon: Icons.wifi_off_rounded,
-        );
-      } else {
-        _mqtt.setAutoTemperature(newTemp, targetDeviceId: _effectiveDeviceId);
-        _showSnack(
-          'Smart Automation target set to $newTemp°C',
-          AppColors.primary,
-          icon: Icons.thermostat_rounded,
-        );
-      }
-    }
-  }
-
-  Widget _buildTemperatureThresholdTriggerItem({
-    required bool enabled,
-    required bool isDark,
-    required StateSetter setModalState,
-  }) {
-    final titleColor = enabled
-        ? (isDark ? Colors.white : AppColors.textPrimary)
-        : (isDark ? Colors.white54 : Colors.black45);
-    final descColor = enabled
-        ? (isDark ? Colors.white60 : Colors.black54)
-        : (isDark ? Colors.white24 : Colors.black26);
-    final iconColor = enabled
-        ? AppColors.primary
-        : (isDark ? Colors.white24 : Colors.black26);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-      decoration: BoxDecoration(
-        color: enabled
-            ? (isDark
-                ? AppColors.primary.withOpacity(0.08)
-                : AppColors.primary.withOpacity(0.05))
-            : (isDark
-                ? Colors.white.withOpacity(0.02)
-                : Colors.black.withOpacity(0.02)),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: enabled
-              ? AppColors.primary.withOpacity(0.25)
-              : (isDark ? Colors.white10 : Colors.black12),
-          width: 1,
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: enabled
-                  ? AppColors.primary.withOpacity(0.12)
-                  : (isDark
-                      ? Colors.white.withOpacity(0.03)
-                      : Colors.black.withOpacity(0.03)),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(Icons.thermostat_rounded,
-                color: iconColor, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        'Temperature Threshold',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: titleColor,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: enabled
-                            ? AppColors.primary.withOpacity(0.2)
-                            : (isDark
-                                ? Colors.white10
-                                : Colors.black.withOpacity(0.05)),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        '$_autoTemp°C',
-                        style: GoogleFonts.outfit(
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: enabled
-                              ? AppColors.primary
-                              : (isDark
-                                  ? Colors.white38
-                                  : Colors.black38),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'Turn off AC when room temp drops below $_autoTemp°C',
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    color: descColor,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          // Stepper: -  [Temp]  +
-          Container(
-            decoration: BoxDecoration(
-              color: isDark
-                  ? const Color(0xFF1E293B)
-                  : Colors.white,
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(
-                color: enabled
-                    ? AppColors.primary.withOpacity(0.4)
-                    : (isDark ? Colors.white12 : Colors.black12),
-                width: 1,
-              ),
-              boxShadow: isDark
-                  ? null
-                  : [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      )
-                    ],
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Decrease button (-)
-                Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(20),
-                    onTap: _autoTemp <= 16
-                        ? null
-                        : () => _updateAutoTemp(
-                            _autoTemp - 1, setModalState),
-                    child: Padding(
-                      padding: const EdgeInsets.all(7),
-                      child: Icon(
-                        Icons.remove_rounded,
-                        size: 16,
-                        color: _autoTemp <= 16
-                            ? (isDark
-                                ? Colors.white24
-                                : Colors.black26)
-                            : (enabled
-                                ? (isDark
-                                    ? Colors.white
-                                    : AppColors.textPrimary)
-                                : (isDark
-                                    ? Colors.white38
-                                    : Colors.black38)),
-                      ),
-                    ),
-                  ),
-                ),
-                Container(
-                  constraints: const BoxConstraints(minWidth: 28),
-                  alignment: Alignment.center,
-                  child: Text(
-                    '$_autoTemp°',
-                    style: GoogleFonts.outfit(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: enabled
-                          ? AppColors.primary
-                          : (isDark
-                              ? Colors.white54
-                              : Colors.black45),
-                    ),
-                  ),
-                ),
-                // Increase button (+)
-                Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(20),
-                    onTap: _autoTemp >= 30
-                        ? null
-                        : () => _updateAutoTemp(
-                            _autoTemp + 1, setModalState),
-                    child: Padding(
-                      padding: const EdgeInsets.all(7),
-                      child: Icon(
-                        Icons.add_rounded,
-                        size: 16,
-                        color: _autoTemp >= 30
-                            ? (isDark
-                                ? Colors.white24
-                                : Colors.black26)
-                            : (enabled
-                                ? (isDark
-                                    ? Colors.white
-                                    : AppColors.textPrimary)
-                                : (isDark
-                                    ? Colors.white38
-                                    : Colors.black38)),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
-
-class _TopMessageBarWidget extends StatefulWidget {
-  final String message;
-  final Color color;
-  final IconData? icon;
-  final double topOffset;
-  final VoidCallback onDismiss;
-
-  const _TopMessageBarWidget({
-    required this.message,
-    required this.color,
-    this.icon,
-    required this.topOffset,
-    required this.onDismiss,
-  });
-
-  @override
-  State<_TopMessageBarWidget> createState() => _TopMessageBarWidgetState();
-}
-
-class _TopMessageBarWidgetState extends State<_TopMessageBarWidget>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  late Animation<double> _slideAnimation;
-  late Animation<double> _fadeAnimation;
-  Timer? _dismissTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 320),
-    );
-
-    _slideAnimation = Tween<double>(begin: -40.0, end: 0.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
-    );
-
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeIn),
-    );
-
-    _controller.forward();
-
-    _dismissTimer = Timer(const Duration(milliseconds: 2800), () {
-      _dismiss();
-    });
-  }
-
-  void _dismiss() {
-    if (!mounted) return;
-    _dismissTimer?.cancel();
-    _controller.reverse().then((_) {
-      if (mounted) {
-        widget.onDismiss();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _dismissTimer?.cancel();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Positioned(
-      top: widget.topOffset,
-      left: 16,
-      right: 16,
-      child: Material(
-        color: Colors.transparent,
-        child: AnimatedBuilder(
-          animation: _controller,
-          builder: (context, child) {
-            return Transform.translate(
-              offset: Offset(0, _slideAnimation.value),
-              child: Opacity(
-                opacity: _fadeAnimation.value.clamp(0.0, 1.0),
-                child: child,
-              ),
-            );
-          },
-          child: GestureDetector(
-            onVerticalDragUpdate: (details) {
-              if (details.primaryDelta != null && details.primaryDelta! < -4) {
-                _dismiss();
-              }
-            },
-            onTap: _dismiss,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              decoration: BoxDecoration(
-                color: widget.color,
-                borderRadius: BorderRadius.circular(14),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.3),
-                    blurRadius: 16,
-                    offset: const Offset(0, 6),
-                  ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  if (widget.icon != null) ...[
-                    Icon(widget.icon, color: Colors.white, size: 20),
-                    const SizedBox(width: 10),
-                  ] else ...[
-                    const Icon(Icons.check_circle_outline_rounded,
-                        color: Colors.white, size: 20),
-                    const SizedBox(width: 10),
-                  ],
-                  Expanded(
-                    child: Text(
-                      widget.message,
-                      style: GoogleFonts.inter(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: _dismiss,
-                    child: Icon(
-                      Icons.close_rounded,
-                      color: Colors.white.withOpacity(0.85),
-                      size: 18,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-

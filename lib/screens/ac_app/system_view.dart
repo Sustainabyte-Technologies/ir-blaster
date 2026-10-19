@@ -12,8 +12,13 @@ import 'package:ir_blaster_ac/core/services/admin_service.dart';
 
 /// System View page showing list of AC monitoring systems with their equipments
 class SystemViewPage extends StatefulWidget {
-  final void Function(String systemId, String systemName, String systemShortId)?
-      onViewPressed;
+  final void Function(
+    String systemId,
+    String systemName,
+    String systemShortId, {
+    String? equipmentId,
+    String? imei,
+  })? onViewPressed;
   final void Function(int count)? onCountChanged;
 
   const SystemViewPage({super.key, this.onViewPressed, this.onCountChanged});
@@ -203,9 +208,8 @@ class SystemViewPageState extends State<SystemViewPage> {
         // Fetch live statuses from cached Redis API, then subscribe to SSE stream
         _fetchLiveStatuses(companyId, siteId, token).then((_) {
           for (var eq in allEquips ?? []) {
-            final shortId = (eq['shortId'] ?? eq['ShortId'] ?? '').toString();
-            final imei = (eq['imei'] ?? eq['Imei'] ?? '').toString();
-            final devId = shortId.isNotEmpty ? shortId : imei;
+            final imei = (eq['imei'] ?? eq['Imei'] ?? eq['deviceId'] ?? eq['DeviceId'] ?? '').toString();
+            final devId = imei.isNotEmpty ? imei : (eq['id'] ?? eq['Id'] ?? '').toString();
             if (devId.isNotEmpty) {
               _startSseForEquipment(companyId, devId, imei);
             }
@@ -624,10 +628,11 @@ class SystemViewPageState extends State<SystemViewPage> {
                       child: _SystemCardWithEquipments(
                         system: system,
                         equipments: equipments,
-                        onViewPressed:
-                            (String id, String name, String shortId) {
+                        onViewPressed: (String id, String name, String shortId,
+                            {String? equipmentId, String? imei}) {
                           if (widget.onViewPressed != null) {
-                            widget.onViewPressed!(id, name, shortId);
+                            widget.onViewPressed!(id, name, shortId,
+                                equipmentId: equipmentId, imei: imei);
                           }
                         },
                       ),
@@ -766,8 +771,13 @@ class SystemItem {
 class _SystemCardWithEquipments extends StatelessWidget {
   final SystemItem system;
   final List<Map<String, dynamic>> equipments;
-  final void Function(String systemId, String systemName, String systemShortId)
-      onViewPressed;
+  final void Function(
+    String systemId,
+    String systemName,
+    String systemShortId, {
+    String? equipmentId,
+    String? imei,
+  }) onViewPressed;
 
   const _SystemCardWithEquipments({
     required this.system,
@@ -785,8 +795,31 @@ class _SystemCardWithEquipments extends StatelessWidget {
         isDark ? AppColors.textSecondaryDark : AppColors.textSecondary;
 
     return GestureDetector(
-      onTap: () => onViewPressed(
-          system.systemId, system.originalName, system.systemShortId),
+      onTap: () {
+        final firstEq = equipments.isNotEmpty ? equipments.first : null;
+        final eqId = firstEq != null
+            ? (firstEq['id'] ?? firstEq['Id'] ?? firstEq['equipmentId'] ?? '')
+                .toString()
+            : null;
+        final eqName = firstEq != null
+            ? (firstEq['name'] ?? firstEq['Name'] ?? system.equipment).toString()
+            : system.equipment;
+        final eqImei = firstEq != null
+            ? (firstEq['imei'] ??
+                    firstEq['Imei'] ??
+                    firstEq['deviceId'] ??
+                    firstEq['DeviceId'] ??
+                    '')
+                .toString()
+            : null;
+        onViewPressed(
+          system.systemId,
+          eqName,
+          (eqImei != null && eqImei.isNotEmpty) ? eqImei : system.systemShortId,
+          equipmentId: eqId,
+          imei: eqImei,
+        );
+      },
       child: Container(
         decoration: BoxDecoration(
           color: cardColor,
@@ -1004,11 +1037,19 @@ class _SystemCardWithEquipments extends StatelessWidget {
     }
 
     final sysId = (e['systemId'] ?? e['SystemId'] ?? '').toString();
-    final imei = (e['imei'] ?? e['Imei'] ?? e['shortId'] ?? e['ShortId'] ?? e['equipmentShortId'] ?? '').toString();
+    final eqId = (e['id'] ?? e['Id'] ?? e['equipmentId'] ?? e['EquipmentId'] ?? '').toString();
+    final imei = (e['imei'] ?? e['Imei'] ?? e['deviceId'] ?? e['DeviceId'] ?? '').toString();
 
     return GestureDetector(
+      behavior: HitTestBehavior.opaque,
       onTap: () {
-        onViewPressed(sysId, name, imei);
+        onViewPressed(
+          sysId.isNotEmpty ? sysId : system.systemId,
+          name,
+          imei.isNotEmpty ? imei : system.systemShortId,
+          equipmentId: eqId.isNotEmpty ? eqId : null,
+          imei: imei.isNotEmpty ? imei : null,
+        );
       },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),

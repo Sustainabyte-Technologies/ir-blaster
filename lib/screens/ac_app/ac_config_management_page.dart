@@ -2601,14 +2601,14 @@ class _AcConfigManagementPageState extends State<AcConfigManagementPage> with Si
                               'Brand: $eqBrand${eqModel.isNotEmpty ? " • Model: $eqModel" : ""}',
                               style: GoogleFonts.inter(fontSize: 12, color: AppColors.primary),
                             ),
-                            if (eqImei.isNotEmpty || shortId.isNotEmpty)
+                            if (eqImei.isNotEmpty)
                               Text(
-                                '${eqImei.isNotEmpty ? "IMEI: $eqImei" : ""}${shortId.isNotEmpty ? " • ID: $shortId" : ""}',
+                                'IMEI: $eqImei',
                                 style: GoogleFonts.inter(fontSize: 11, color: AppColors.textSecondary),
                               ),
                           ],
                         ),
-                        isThreeLine: eqImei.isNotEmpty || shortId.isNotEmpty,
+                        isThreeLine: eqImei.isNotEmpty,
                       ),
                     );
                   },

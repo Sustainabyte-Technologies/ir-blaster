@@ -25,13 +25,18 @@ class AppConfig {
     return rawUrl;
   }
 
+  /// Default company ID from environment if available
+  static String get companyId => dotenv.env['COMPANY_ID'] ?? '';
+
   // ── MQTT (SIRIS IR Blaster) ──────────────────────────────────────────
   // Fetched dynamically from MqttConfigService (API) with .env fallbacks.
   // Never hardcode any broker, credentials, root, or device ID.
   static String get mqttBroker {
     final cachedHost = MqttConfigService.cached?.host;
     if (cachedHost != null && cachedHost.isNotEmpty) return cachedHost;
-    return dotenv.env['MQTT_BROKER'] ?? '';
+    final envVal = dotenv.env['MQTT_BROKER'];
+    if (envVal != null && envVal.isNotEmpty) return envVal;
+    return '13.66.130.236';
   }
 
   static int get mqttPort {
@@ -40,7 +45,7 @@ class AppConfig {
     return int.tryParse(dotenv.env['MQTT_PORT'] ?? '') ?? 1883;
   }
 
-  /// Dynamic MQTT username (prefer MqttConfigService.cached)
+  /// Dynamic MQTT username (strictly from MqttConfigService API cache)
   static String get mqttUsername {
     final cached = MqttConfigService.cached?.username;
     if (cached != null && cached.isNotEmpty) return cached;
@@ -49,7 +54,7 @@ class AppConfig {
     return '';
   }
 
-  /// Dynamic MQTT password (prefer MqttConfigService.cached)
+  /// Dynamic MQTT password (strictly from MqttConfigService API cache)
   static String get mqttPassword {
     final cached = MqttConfigService.cached?.password;
     if (cached != null && cached.isNotEmpty) return cached;
@@ -58,7 +63,7 @@ class AppConfig {
     return '';
   }
 
-  /// Dynamic MQTT ROOT topic (e.g. "iaq" or "customer/site/device")
+  /// Dynamic MQTT ROOT topic (strictly from MqttConfigService API cache)
   static String get mqttRoot {
     final cachedTopic = MqttConfigService.cached?.topic;
     if (cachedTopic != null && cachedTopic.isNotEmpty) return cachedTopic;
@@ -78,11 +83,11 @@ class AppConfig {
       (mqttRoot.isNotEmpty ? '$mqttRoot/data' : 'data');
 
   static String _defaultMqttDeviceId = '';
+
   /// The dynamic device_id used in MQTT payloads & device resolution
-  static String get mqttDeviceId =>
-      _defaultMqttDeviceId.isNotEmpty
-          ? _defaultMqttDeviceId
-          : (dotenv.env['MQTT_DEVICE_ID'] ?? '');
+  static String get mqttDeviceId => _defaultMqttDeviceId.isNotEmpty
+      ? _defaultMqttDeviceId
+      : (dotenv.env['MQTT_DEVICE_ID'] ?? '');
 
   static set mqttDeviceId(String value) {
     if (value.isNotEmpty) {
@@ -118,7 +123,9 @@ class AppConfig {
   /// AC ON/OFF/STATUS control topic: <MQTT_ROOT>/<deviceId>/control
   static String getMqttControlTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/control' : '$deviceId/control';
     }
     return root.isNotEmpty ? '$root/control' : 'control';
@@ -127,8 +134,12 @@ class AppConfig {
   /// Dedicated temperature set topic: <MQTT_ROOT>/<deviceId>/control/set_temp
   static String getMqttTempTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
-      return root.isNotEmpty ? '$root/$deviceId/control/set_temp' : '$deviceId/control/set_temp';
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty
+          ? '$root/$deviceId/control/set_temp'
+          : '$deviceId/control/set_temp';
     }
     return root.isNotEmpty ? '$root/control/set_temp' : 'control/set_temp';
   }
@@ -136,8 +147,12 @@ class AppConfig {
   /// Schedule control topic (Plaintext Mode): <MQTT_ROOT>/<deviceId>/schedule
   static String getMqttScheduleTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
-      return root.isNotEmpty ? '$root/$deviceId/schedule' : '$deviceId/schedule';
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty
+          ? '$root/$deviceId/schedule'
+          : '$deviceId/schedule';
     }
     return root.isNotEmpty ? '$root/schedule' : 'schedule';
   }
@@ -145,16 +160,22 @@ class AppConfig {
   /// Schedule control topic (SIRIS 2.0 JSON Mode): <MQTT_ROOT>/<deviceId>/schedule
   static String getMqttJsonScheduleTopic(String deviceId) {
     final root = mqttRoot;
-    if (root.isNotEmpty && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (root.isNotEmpty &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return '$root/$deviceId/schedule';
     }
-    return deviceId.isNotEmpty ? '$deviceId/schedule' : getMqttScheduleTopic(deviceId);
+    return deviceId.isNotEmpty
+        ? '$deviceId/schedule'
+        : getMqttScheduleTopic(deviceId);
   }
 
   /// WiFi control and status topic: <MQTT_ROOT>/<deviceId>/wifi
   static String getMqttWifiTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/wifi' : '$deviceId/wifi';
     }
     return root.isNotEmpty ? '$root/wifi' : 'wifi';
@@ -163,7 +184,9 @@ class AppConfig {
   /// OTA check & update topic: <MQTT_ROOT>/<deviceId>/ota
   static String getMqttOtaTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/ota' : '$deviceId/ota';
     }
     return root.isNotEmpty ? '$root/ota' : 'ota';
@@ -172,7 +195,9 @@ class AppConfig {
   /// Status topic: <MQTT_ROOT>/<deviceId>/status
   static String getMqttStatusTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/status' : '$deviceId/status';
     }
     return root.isNotEmpty ? '$root/status' : 'status';
@@ -181,7 +206,9 @@ class AppConfig {
   /// Data telemetry topic: <MQTT_ROOT>/<deviceId>/data
   static String getMqttDataTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/data' : '$deviceId/data';
     }
     return root.isNotEmpty ? '$root/data' : 'data';
@@ -190,7 +217,9 @@ class AppConfig {
   /// Online status topic: <MQTT_ROOT>/<deviceId>/online
   static String getMqttOnlineTopic([String? deviceId]) {
     final root = mqttRoot;
-    if (deviceId != null && deviceId.isNotEmpty && deviceId.toLowerCase() != root.toLowerCase()) {
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
       return root.isNotEmpty ? '$root/$deviceId/online' : '$deviceId/online';
     }
     return root.isNotEmpty ? '$root/online' : 'online';
@@ -199,6 +228,19 @@ class AppConfig {
   /// IR learn control topic: <MQTT_ROOT>/<deviceId>/control
   static String getMqttIrLearnTopic([String? deviceId]) {
     return getMqttControlTopic(deviceId);
+  }
+
+  /// Dedicated IR learn topic: <MQTT_ROOT>/<deviceId>/ir_learn or <MQTT_ROOT>/ir_learn
+  static String getMqttLearnTopic([String? deviceId]) {
+    final root = mqttRoot;
+    if (deviceId != null &&
+        deviceId.isNotEmpty &&
+        deviceId.toLowerCase() != root.toLowerCase()) {
+      return root.isNotEmpty
+          ? '$root/$deviceId/ir_learn'
+          : '$deviceId/ir_learn';
+    }
+    return root.isNotEmpty ? '$root/ir_learn' : 'ir_learn';
   }
 
   // Legacy getters

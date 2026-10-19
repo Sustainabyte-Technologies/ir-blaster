@@ -56,14 +56,26 @@ class _MainNavigationPageState extends State<MainNavigationPage> {
                     key: _systemViewKey,
                     onCountChanged: (count) =>
                         setState(() => _systemCount = count),
-                    onViewPressed: (systemId, systemName, systemShortId) async {
+                    onViewPressed: (
+                      systemId,
+                      systemName,
+                      systemShortId, {
+                      String? equipmentId,
+                      String? imei,
+                    }) async {
+                      final companyId = await AuthService.getCompanyId();
+                      if (!mounted) return;
                       await Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (context) => ACControlPage(
                             deviceName: systemName,
                             systemId: systemId,
-                            systemShortId: systemShortId,
+                            systemShortId: (imei != null && imei.isNotEmpty)
+                                ? imei
+                                : systemShortId,
+                            equipmentId: equipmentId,
+                            companyId: companyId,
                           ),
                         ),
                       );

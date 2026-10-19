@@ -7,7 +7,9 @@ import 'firebase_options.dart';
 import 'package:ir_blaster_ac/core/theme/app_theme.dart';
 import 'package:ir_blaster_ac/core/theme/theme_provider.dart';
 import 'package:ir_blaster_ac/core/constants/colors.dart';
+import 'dart:async';
 import 'package:ir_blaster_ac/core/services/auth_service.dart' as ac_auth;
+import 'package:ir_blaster_ac/core/services/mqtt_config_service.dart';
 import 'package:ir_blaster_ac/screens/ac_app/sigin.dart';
 import 'package:ir_blaster_ac/screens/main_navigation_page.dart';
 import 'package:ir_blaster_ac/screens/ac_app/splash_screen.dart';
@@ -199,6 +201,13 @@ class _AuthGateState extends State<_AuthGate> {
       result = cachedUser;
     } else if (await ac_auth.AuthService.hasStoredSession()) {
       result = await ac_auth.AuthService.verify();
+    }
+
+    if (result != null) {
+      final cId = ac_auth.AuthService.extractCompanyId(result);
+      if (cId != null && cId.isNotEmpty) {
+        unawaited(MqttConfigService.fetchMqttConfig(companyId: cId, type: 'ac'));
+      }
     }
 
     // Ensure splash screen is visible for at least 2.5 seconds
